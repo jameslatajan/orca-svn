@@ -213,7 +213,7 @@ export default function activate(orca: OrcaWorkerApi): void {
   orca.panels.handle('svn.history', async () => {
     const ws = await local()
     return svnInvalid(async () => {
-      const { graph, urls } = await loadHistory(options.runner, ws.path)
+      const { graph, urls } = await loadHistory(options.runner, ws.path, (p) => orca.panels.post('svn.historyProgress', p))
       laneUrls = urls
       currentLane = graph.lanes.find((l) => l.current)?.id ?? null
       return graph

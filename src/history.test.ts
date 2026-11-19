@@ -48,7 +48,10 @@ test('real repo: trunk, a branch, a tag and a merge', { skip: !hasSvn() }, async
   execFileSync('svn', ['-q', 'commit', '-m', 'merge feat'], { cwd: wc }) // r6
   execFileSync('svn', ['-q', 'update'], { cwd: wc })
 
-  const { graph, urls } = await loadHistory(defaultRunner, wc)
+  const steps: { done: number; total: number }[] = []
+  const { graph, urls } = await loadHistory(defaultRunner, wc, (p) => steps.push(p))
+  const last = steps[steps.length - 1]
+  assert.ok(steps.length > 3 && last.total > 0 && last.done === last.total, JSON.stringify(steps))
   assert.ok(graph.standardLayout)
   const trunk = graph.lanes.find((l) => l.id === 'trunk')
   const feat = graph.lanes.find((l) => l.id === 'b:feat')

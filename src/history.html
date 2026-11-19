@@ -42,6 +42,24 @@
   .notice { margin: 8px 12px; padding: 6px 8px; border-radius: 6px; font-size: 12px; background: var(--orca-muted, #f5f5f5); }
   .notice.err { color: var(--orca-destructive, #dc2626); }
   .more { padding: 10px 12px; }
+  /* Loading */
+  #loader { margin: 0 12px 8px; padding: 8px 10px; border-radius: 8px; background: var(--orca-muted, #f5f5f5); font-size: 12px; }
+  #loader[hidden] { display: none; }
+  .lrow { display: flex; align-items: center; gap: 8px; }
+  .spin { width: 12px; height: 12px; border-radius: 50%; border: 2px solid var(--orca-border, #ccc); border-top-color: var(--orca-primary, #2563eb); animation: spin .8s linear infinite; flex: none; }
+  @keyframes spin { to { transform: rotate(360deg); } }
+  .lstep { flex: 1; min-width: 0; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+  .bar { height: 3px; border-radius: 2px; background: var(--orca-border, #e5e5e5); margin-top: 7px; overflow: hidden; }
+  .bar > div { height: 100%; width: 0; background: var(--orca-primary, #2563eb); transition: width .25s ease; }
+  .bar.indet > div { width: 30%; animation: indet 1.2s ease-in-out infinite; }
+  @keyframes indet { from { transform: translateX(-100%); } to { transform: translateX(340%); } }
+  .sk { display: flex; align-items: center; gap: 10px; height: 40px; padding: 0 12px; }
+  .sk i, .sk b { display: block; border-radius: 4px; background: linear-gradient(90deg, var(--orca-muted, #eee) 25%, var(--orca-border, #ddd) 50%, var(--orca-muted, #eee) 75%); background-size: 200% 100%; animation: shimmer 1.3s linear infinite; }
+  .sk i { width: 10px; height: 10px; border-radius: 50%; flex: none; }
+  .sk b { height: 9px; }
+  @keyframes shimmer { from { background-position: 200% 0; } to { background-position: -200% 0; } }
+  .stale { opacity: .45; pointer-events: none; transition: opacity .2s; }
+  @media (prefers-reduced-motion: reduce) { .spin, .bar.indet > div, .sk i, .sk b { animation: none; } }
 </style>
 </head>
 <body>
@@ -49,6 +67,10 @@
   <div><b>History</b> <span id="where" class="muted xs"></span></div>
   <button class="icon" id="refresh" title="Refresh history" aria-label="Refresh history">⟳</button>
 </header>
+<div id="loader" hidden role="status" aria-live="polite">
+  <div class="lrow"><span class="spin"></span><span class="lstep" id="lstep">Loading…</span><span class="muted xs" id="ltime"></span></div>
+  <div class="bar indet" id="lbar"><div></div></div>
+</div>
 <div id="notice"></div>
 <div id="legend" class="legend"></div>
 <div id="graph"></div>
@@ -73,10 +95,35 @@
   function notice(text, err) { $('notice').innerHTML = text ? `<div class="notice${err ? ' err' : ''}">${esc(text)}</div>` : '' }
   const errText = (e) => (e && e.message) || String(e)
 
+  let timer = null
+  function startLoader() {
+    const t0 = Date.now()
+    $('loader').hidden = false
+    $('lstep').textContent = 'Contacting the repository…'
+    $('lbar').classList.add('indet'); $('lbar').firstElementChild.style.width = ''
+    $('ltime').textContent = ''
+    timer = setInterval(() => { $('ltime').textContent = Math.round((Date.now() - t0) / 1000) + 's' }, 1000)
+    if (graph) $('graph').classList.add('stale')
+    else $('graph').innerHTML = Array.from({ length: 8 }, (_, i) =>
+      `<div class="sk" style="padding-left:${14 + (i % 3 === 1 ? 14 : 0)}px"><i></i><div style="flex:1"><b style="width:${55 + ((i * 37) % 35)}%"></b><b style="width:30%;margin-top:6px;height:7px"></b></div></div>`).join('')
+  }
+  function stopLoader() {
+    clearInterval(timer); timer = null
+    $('loader').hidden = true
+    $('graph').classList.remove('stale')
+  }
+  orca.on('svn.historyProgress', (p) => {
+    if (!busy) return
+    $('lstep').textContent = p.total ? `${p.step} (${p.done}/${p.total})` : p.step
+    const bar = $('lbar')
+    if (p.total) { bar.classList.remove('indet'); bar.firstElementChild.style.width = Math.round((p.done / p.total) * 100) + '%' }
+  })
+
   async function load() {
     if (busy) return
     busy = true; $('refresh').disabled = true
-    notice('Loading history from the repository…')
+    notice('')
+    startLoader()
     try {
       graph = await orca.plugin.request('svn.history')
       notice(graph.standardLayout ? '' : 'No trunk/branches/tags layout found; showing this line only.')
@@ -88,6 +135,7 @@
       notice(errText(e), true)
     } finally {
       busy = false; $('refresh').disabled = false
+      stopLoader()
     }
   }
 

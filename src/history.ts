@@ -102,7 +102,10 @@ export function buildGraph(input: {
 /** Repository path → URL for each lane id of the last load, so requests name lanes, not URLs. */
 export type LaneUrls = Map<string, string>
 
-export async function loadHistory(run: svn.SvnRunner, cwd: string): Promise<{ graph: HistoryGraph; urls: LaneUrls }> {
+export type Progress = (p: { step: string; done: number; total: number }) => void
+
+export async function loadHistory(run: svn.SvnRunner, cwd: string, progress: Progress = () => {}): Promise<{ graph: HistoryGraph; urls: LaneUrls }> {
+  progress({ step: 'Reading working copy…', done: 0, total: 0 })
   const [info, root] = await Promise.all([svn.info(run, cwd), svn.reposRoot(run, cwd)])
   const layout = parseLayout(info.relativeUrl)
   const current = info.relativeUrl.replace(/^\^/, '') || '/'
@@ -136,6 +139,7 @@ export async function loadHistory(run: svn.SvnRunner, cwd: string): Promise<{ gr
     return { graph: buildGraph({ lanes: only ? [only] : [], current, tags: [], mergeinfo: '', standard: false }), urls }
   }
 
+  progress({ step: 'Listing branches and tags…', done: 0, total: 0 })
   const [branchDirs, tagDirs] = await Promise.all([children('branches'), children('tags')])
   const branchPath = (n: string) => `${layout.prefix}/branches/${n}${layout.suffix}`
   const picked = branchDirs.slice(0, LIMITS.branches)
@@ -143,25 +147,38 @@ export async function loadHistory(run: svn.SvnRunner, cwd: string): Promise<{ gr
   const onBranch = /\/branches\/([^/]+)/.exec(current.slice(layout.prefix.length))?.[1]
   if (onBranch && !picked.some((b) => b.name === onBranch)) picked.push({ name: onBranch, kind: 'dir', revision: null, date: '' })
 
+  const pickedTags = tagDirs.slice(0, LIMITS.tags)
+  const total = 1 + picked.length + pickedTags.length + 1
+  let done = 0
+  const tick = <T>(label: string) => (v: T) => {
+    done++
+    progress({ step: `Read ${label}`, done, total })
+    return v
+  }
+  progress({ step: `Reading trunk and ${picked.length} branches…`, done, total })
   const laneResults = await Promise.all([
-    laneLog('trunk', 'trunk', 'trunk', `${layout.prefix}/trunk${layout.suffix}`),
-    ...picked.map((b) => laneLog(`b:${b.name}`, b.name, 'branch', branchPath(b.name)))
+    laneLog('trunk', 'trunk', 'trunk', `${layout.prefix}/trunk${layout.suffix}`).then(tick('trunk')),
+    ...picked.map((b) => laneLog(`b:${b.name}`, b.name, 'branch', branchPath(b.name)).then(tick(b.name)))
   ])
   const lanes = laneResults.filter((l): l is LaneInput => !!l)
 
   const tags = (
     await Promise.all(
-      tagDirs.slice(0, LIMITS.tags).map(async (t) => {
+      pickedTags.map(async (t) => {
         const path = `${layout.prefix}/tags/${t.name}${layout.suffix}`
         try {
           return { name: t.name, path, entries: await svn.log(run, cwd, urlOf(path), { limit: 1, verbose: true, stopOnCopy: true }) }
         } catch {
           return null
+        } finally {
+          tick(`tag ${t.name}`)(null)
         }
       })
     )
   ).filter((t): t is { name: string; path: string; entries: svn.LogEntry[] } => !!t)
 
+  progress({ step: 'Reading merges…', done, total })
   const mergeinfo = await svn.propget(run, cwd, 'svn:mergeinfo', urlOf(current))
+  tick('merges')(null)
   return { graph: buildGraph({ lanes, current, tags, mergeinfo, standard: true }), urls }
 }

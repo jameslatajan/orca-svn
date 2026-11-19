@@ -85,5 +85,7 @@ declare module 'orca' {
     'svn.changed': SvnState
     /** Asks the panel to focus the commit form (palette "SVN: Commit…"). */
     'svn.showCommit': Record<string, never>
+    /** Progress of a running `svn.history` load. */
+    'svn.historyProgress': { step: string; done: number; total: number }
   }
 }
