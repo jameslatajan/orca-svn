@@ -5,7 +5,7 @@ import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { pathToFileURL } from 'node:url'
 import { copyOrigin, loadHistory, parseLayout, parseMergeinfo } from './history'
-import { defaultRunner, parseLog } from './svn'
+import { defaultRunner, diffRevision, headRevision, parseLog } from './svn'
 import { hasSvn } from './testRepo'
 
 test('parseLayout finds trunk/branches/tags around a project folder', () => {
@@ -64,4 +64,9 @@ test('real repo: trunk, a branch, a tag and a merge', { skip: !hasSvn() }, async
     ['trunk@6', 'b:feat@5', 'b:feat@3', 'trunk@2', 'trunk@1']
   )
   assert.equal(urls.get('b:feat'), `${url}/branches/feat/app`)
+
+  // Diff of one revision runs without a shell, so URLs with % are fine.
+  const d = await diffRevision(defaultRunner, wc, `${url}/branches/feat/app`, 5)
+  assert.ok(d.text.includes('+b') && !d.truncated, d.text)
+  assert.equal(await headRevision(defaultRunner, wc, `${url}/trunk/app`), 6)
 })

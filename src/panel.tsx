@@ -322,6 +322,18 @@ export default function Panel() {
     <Stack gap="sm">
       <Header s={s} />
       <Separator />
+      {s.behind ? (
+        <Callout tone="warning" title="Not on the latest revision">
+          <Stack gap="xs">
+            <Text size="sm">{`Working copy is at r${s.info?.revision ?? '?'}; the server has r${s.behind.head}.`}</Text>
+            <Row>
+              <Button size="sm" variant="outline" icon="download" disabled={!!read(busy)} onPress={update}>
+                Update to latest
+              </Button>
+            </Row>
+          </Stack>
+        </Callout>
+      ) : null}
       {noticeBox}
       {s.files.length ? <CommitBox files={s.files} /> : <Text muted>No local changes.</Text>}
       <Conflicts files={of(['conflicted'])} />

@@ -76,6 +76,13 @@ test('add all adds every unversioned file', async () => {
   await view.unmount()
 })
 
+test('warns when the working copy is behind the server', async () => {
+  const view = await mount(panel, { host: mockHost({ requests: { 'svn.state': { ...dirty, behind: { head: 9 } } } }) })
+  assert.ok(view.find({ text: 'Working copy is at r5; the server has r9.' }))
+  assert.ok(view.find({ text: 'Update to latest' }))
+  await view.unmount()
+})
+
 test('branchName', () => {
   assert.equal(panel.branchName('^/branches/feature-x'), 'feature-x')
   assert.equal(panel.branchName('^/trunk'), 'trunk')

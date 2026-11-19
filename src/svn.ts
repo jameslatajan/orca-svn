@@ -285,8 +285,18 @@ export async function propget(run: SvnRunner, cwd: string, name: string, url: st
   return r.code === 0 ? r.stdout : ''
 }
 
-export async function updateTo(run: SvnRunner, cwd: string, revision: number): Promise<number | null> {
-  return parseRevision(await svn(run, ['update', '-r', String(revision), '.'], cwd, LONG_TIMEOUT_MS))
+/** Last revision that changed `url` on the server (HEAD); contacts the server. */
+export async function headRevision(run: SvnRunner, cwd: string, url: string): Promise<number | null> {
+  const n = Number((await svn(run, ['info', '--show-item', 'last-changed-revision', '-r', 'HEAD', url], cwd)).trim())
+  return Number.isFinite(n) && n > 0 ? n : null
+}
+
+export const MAX_DIFF_BYTES = 400_000
+
+/** `svn diff -c REV url`, cut at MAX_DIFF_BYTES. Runs without a shell, so any URL is safe. */
+export async function diffRevision(run: SvnRunner, cwd: string, url: string, revision: number): Promise<{ text: string; truncated: boolean }> {
+  const out = await svn(run, ['diff', '-c', String(revision), url], cwd, LONG_TIMEOUT_MS)
+  return out.length > MAX_DIFF_BYTES ? { text: out.slice(0, MAX_DIFF_BYTES), truncated: true } : { text: out, truncated: false }
 }
 
 export async function switchTo(run: SvnRunner, cwd: string, url: string): Promise<number | null> {

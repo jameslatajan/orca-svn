@@ -20,6 +20,8 @@ export type SvnState = {
   info?: SvnInfo
   files: SvnFile[]
   error?: string
+  /** Latest revision on the server that changed this URL, when newer than the working copy. */
+  behind?: { head: number }
 }
 
 /** What an action reports back to the panel, plus fresh state. */
@@ -73,10 +75,8 @@ declare module 'orca' {
     'svn.history': { output: HistoryGraph }
     /** Changed paths of one revision on a lane from the last `svn.history`. */
     'svn.revision': { input: { lane: string; revision: number }; output: RevisionDetail }
-    /** Opens `svn diff -c REV <lane url>` in a terminal. */
-    'svn.diffRevision': { input: { lane: string; revision: number }; output: { terminalId: string } }
-    /** `svn update -r REV` the working copy (only on its own lane). */
-    'svn.updateTo': { input: { lane: string; revision: number }; output: ActionResult }
+    /** `svn diff -c REV` of a lane, as text for the panel. */
+    'svn.diffRevision': { input: { lane: string; revision: number }; output: { text: string; truncated: boolean } }
     /** `svn switch` the working copy to a lane. */
     'svn.switch': { input: { lane: string }; output: ActionResult }
   }
