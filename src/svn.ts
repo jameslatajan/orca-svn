@@ -330,11 +330,13 @@ export async function reposRoot(run: SvnRunner, cwd: string): Promise<string> {
   return (await svn(run, ['info', '--show-item', 'repos-root-url', '.'], cwd)).trim()
 }
 
-export async function log(run: SvnRunner, cwd: string, url: string, opts: { limit: number; verbose?: boolean; stopOnCopy?: boolean; revision?: number }): Promise<LogEntry[]> {
+export async function log(run: SvnRunner, cwd: string, url: string, opts: { limit: number; verbose?: boolean; stopOnCopy?: boolean; revision?: number; olderThan?: number; oldestFirst?: boolean }): Promise<LogEntry[]> {
   const args = ['log', '--xml', '-l', String(opts.limit)]
   if (opts.verbose) args.push('-v')
   if (opts.stopOnCopy) args.push('--stop-on-copy')
   if (opts.revision != null) args.push('-r', String(opts.revision))
+  else if (opts.olderThan != null) args.push('-r', `${opts.olderThan - 1}:1`)
+  else if (opts.oldestFirst) args.push('-r', '1:HEAD')
   return parseLog(await svn(run, [...args, url], cwd, LONG_TIMEOUT_MS))
 }
 

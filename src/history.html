@@ -53,13 +53,13 @@
   .notice.err { color: var(--orca-destructive, #dc2626); }
   .more { padding: 10px 12px; }
   /* Loading */
-  #loader { margin: 0 12px 8px; padding: 8px 10px; border-radius: 8px; background: var(--orca-muted, #f5f5f5); font-size: 12px; }
+  #loader { margin: 0 12px 6px; font-size: 11px; color: var(--orca-muted-foreground, #737373); }
   #loader[hidden] { display: none; }
   .lrow { display: flex; align-items: center; gap: 8px; }
   .spin { width: 12px; height: 12px; border-radius: 50%; border: 2px solid var(--orca-border, #ccc); border-top-color: var(--orca-primary, #2563eb); animation: spin .8s linear infinite; flex: none; }
   @keyframes spin { to { transform: rotate(360deg); } }
   .lstep { flex: 1; min-width: 0; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
-  .bar { height: 3px; border-radius: 2px; background: var(--orca-border, #e5e5e5); margin-top: 7px; overflow: hidden; }
+  .bar { height: 2px; border-radius: 2px; background: var(--orca-border, #e5e5e5); margin-top: 4px; overflow: hidden; }
   .bar > div { height: 100%; width: 0; background: var(--orca-primary, #2563eb); transition: width .25s ease; }
   .bar.indet > div { width: 30%; animation: indet 1.2s ease-in-out infinite; }
   @keyframes indet { from { transform: translateX(-100%); } to { transform: translateX(340%); } }
@@ -77,13 +77,13 @@
   <div><b>History</b> <span id="where" class="muted xs"></span></div>
   <button class="icon" id="refresh" title="Refresh history" aria-label="Refresh history">⟳</button>
 </header>
+<div id="notice"></div>
+<div id="legend" class="legend"></div>
 <div id="loader" hidden role="status" aria-live="polite">
   <div class="lrow"><span class="spin"></span><span class="lstep" id="lstep">Loading…</span><span class="muted xs" id="ltime"></span></div>
   <div class="bar indet" id="lbar"><div></div></div>
 </div>
-<div id="notice"></div>
-<div id="legend" class="legend"></div>
-<div id="scroll"><div id="graph"></div></div>
+<div id="scroll"><div id="graph"></div><div id="more" class="more muted xs"></div></div>
 <div id="detail"></div>
 
 <script>
@@ -122,6 +122,13 @@
     $('loader').hidden = true
     $('graph').classList.remove('stale')
   }
+  // Each finished stage of a load arrives early: draw it, keep the loader running.
+  orca.on('svn.historyPartial', (g) => {
+    if (!busy) return
+    graph = g
+    $('graph').classList.remove('stale')
+    render()
+  })
   orca.on('svn.historyProgress', (p) => {
     if (!busy) return
     $('lstep').textContent = p.total ? `${p.step} (${p.done}/${p.total})` : p.step
@@ -138,6 +145,7 @@
       graph = await orca.plugin.request('svn.history')
       notice(graph.standardLayout ? '' : 'No trunk/branches/tags layout found; showing this line only.')
       render()
+      nearBottom()
       if (selected && !graph.revisions.some((r) => r.revision === selected.revision && r.lane === selected.lane)) selected = null
       showDetail()
     } catch (e) {
@@ -149,8 +157,37 @@
     }
   }
 
+  // Lazy paging: near the bottom of the list, append the next page of older revisions.
+  let loadingMore = false
+  async function loadOlder() {
+    if (loadingMore || busy || !graph || !graph.hasMore) return
+    loadingMore = true
+    $('more').textContent = 'Loading older revisions…'
+    const was = graph
+    try {
+      const next = await orca.plugin.request('svn.historyMore')
+      if (graph !== was) return // refreshed meanwhile
+      const top = $('scroll').scrollTop
+      graph = next
+      render()
+      $('scroll').scrollTop = top
+    } catch (e) {
+      $('more').textContent = 'Could not load older revisions: ' + errText(e)
+      return
+    } finally {
+      loadingMore = false
+    }
+    nearBottom()
+  }
+  function nearBottom() {
+    const s = $('scroll')
+    if (s.scrollTop + s.clientHeight >= s.scrollHeight - ROW * 5) loadOlder()
+  }
+  $('scroll').addEventListener('scroll', nearBottom, { passive: true })
+
   function render() {
     const g = $('graph'), lg = $('legend')
+    $('more').textContent = graph && graph.revisions.length ? (graph.hasMore ? '' : 'Start of history') : ''
     if (!graph || !graph.revisions.length) { g.innerHTML = graph ? '<div class="notice">No revisions.</div>' : ''; lg.innerHTML = ''; $('where').textContent = ''; return }
     const laneIx = new Map(graph.lanes.map((l, i) => [l.id, i]))
     const color = (id) => COLORS[(laneIx.get(id) ?? 0) % COLORS.length]

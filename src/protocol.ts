@@ -49,6 +49,8 @@ export type HistoryGraph = {
   merges: HistoryMerge[]
   /** False when the URL has no trunk/branches/tags: only the current line is shown. */
   standardLayout: boolean
+  /** True when some lane has older revisions; `svn.historyMore` loads the next page. */
+  hasMore?: boolean
 }
 export type RevisionDetail = {
   revision: number
@@ -74,6 +76,8 @@ declare module 'orca' {
     'svn.log': { output: { terminalId: string } }
     /** Revision tree of trunk, recent branches and tags (contacts the server). */
     'svn.history': { output: HistoryGraph }
+    /** The last history graph with the next page of older revisions appended to each lane. */
+    'svn.historyMore': { output: HistoryGraph }
     /** Changed paths of one revision on a lane from the last `svn.history`. */
     'svn.revision': { input: { lane: string; revision: number }; output: RevisionDetail }
     /** Saves `svn diff -c REV` under .svn/orca-diffs and opens it in an editor tab. */
@@ -88,5 +92,7 @@ declare module 'orca' {
     'svn.showCommit': Record<string, never>
     /** Progress of a running `svn.history` load. */
     'svn.historyProgress': { step: string; done: number; total: number }
+    /** A partial graph from a running svn.history load, drawn before the final result. */
+    'svn.historyPartial': HistoryGraph
   }
 }

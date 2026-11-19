@@ -3,7 +3,7 @@ import type { OrcaWorkerApi } from 'orca/worker'
 import type { ActionResult, SvnState } from './protocol'
 import { isAbsolute, relative } from 'node:path'
 import * as svn from './svn'
-import { loadHistory, type LaneUrls } from './history'
+import { loadHistory, loadMore, type GraphInput, type LaneUrls } from './history'
 import { watchFolder, type FolderWatch } from './watch'
 
 /** Injection points and timings; tests change them. */
@@ -236,6 +236,7 @@ export default function activate(orca: OrcaWorkerApi): void {
   // ---------- History ----------
   /** Lane id → URL from the last history load; requests name lanes, never raw URLs. */
   let laneUrls: LaneUrls = new Map()
+  let historyInput: { path: string; input: GraphInput } | null = null
 
   const laneUrl = (lane: string) => {
     const url = laneUrls.get(lane)
@@ -257,10 +258,22 @@ export default function activate(orca: OrcaWorkerApi): void {
   orca.panels.handle('svn.history', async () => {
     const ws = await local()
     return svnInvalid(async () => {
-      const { graph, urls } = await loadHistory(options.runner, ws.path, (p) => orca.panels.post('svn.historyProgress', p))
+      const { graph, urls, input } = await loadHistory(
+        options.runner,
+        ws.path,
+        (p) => orca.panels.post('svn.historyProgress', p),
+        (g) => orca.panels.post('svn.historyPartial', g)
+      )
       laneUrls = urls
+      historyInput = { path: ws.path, input }
       return graph
     })
+  })
+  orca.panels.handle('svn.historyMore', async () => {
+    const ws = await local()
+    const last = historyInput
+    if (!last || last.path !== ws.path) throw invalid('Load the history first.')
+    return svnInvalid(() => loadMore(options.runner, ws.path, last.input, laneUrls))
   })
   orca.panels.handle('svn.revision', async ({ lane, revision }) => {
     const ws = await local()
