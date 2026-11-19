@@ -1,0 +1,38 @@
+{
+  "manifestVersion": 2,
+  "id": "svn",
+  "name": "SVN",
+  "version": "0.1.0",
+  "license": "Apache-2.0",
+  "description": "Subversion in Orca: see a working copy's changes, then update, commit, revert, add, resolve and diff from a sidebar panel.",
+  "engines": {
+    "orca": ">=1.4.259"
+  },
+  "execution": "trusted-worker",
+  "pluginApi": 1,
+  "main": "src/worker.ts",
+  "contributes": {
+    "panels": [
+      {
+        "id": "svn",
+        "title": "SVN",
+        "icon": "database",
+        "entry": "src/panel.tsx",
+        "ui": "components"
+      }
+    ],
+    "commands": [
+      { "id": "svn.update", "title": "SVN: Update", "when": "workspace" },
+      { "id": "svn.commit", "title": "SVN: Commit…", "when": "workspace" },
+      { "id": "svn.refresh", "title": "SVN: Refresh", "when": "workspace" },
+      { "id": "svn.log", "title": "SVN: Show log", "when": "workspace" }
+    ],
+    "events": [{ "on": "workspace.changed" }]
+  },
+  "capabilities": [
+    { "kind": "storage:own" },
+    { "kind": "workspace:read" },
+    { "kind": "terminal:send" },
+    { "kind": "notifications:show" }
+  ]
+}

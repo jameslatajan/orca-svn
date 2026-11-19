@@ -1,0 +1,217 @@
+// Runs the svn CLI (no shell, always --non-interactive) and parses its XML output.
+import { execFile } from 'node:child_process'
+import { mkdtempSync, rmSync, writeFileSync } from 'node:fs'
+import { tmpdir } from 'node:os'
+import { isAbsolute, join, relative, resolve } from 'node:path'
+import type { FileStatus, SvnInfo, SvnFile } from './protocol'
+
+export type RunResult = { stdout: string; stderr: string; code: number }
+export type SvnRunner = (args: string[], cwd: string, timeoutMs: number) => Promise<RunResult>
+
+/** Thrown for every svn failure; `kind` drives the message the panel shows. */
+export class SvnError extends Error {
+  constructor(
+    message: string,
+    readonly kind: 'missing' | 'not-wc' | 'auth' | 'out-of-date' | 'conflict' | 'timeout' | 'other',
+    readonly detail = ''
+  ) {
+    super(message)
+  }
+}
+
+export const defaultRunner: SvnRunner = (args, cwd, timeoutMs) =>
+  new Promise((done, fail) => {
+    execFile(
+      'svn',
+      args,
+      { cwd, timeout: timeoutMs, maxBuffer: 64 * 1024 * 1024, windowsHide: true, encoding: 'utf8' },
+      (err, stdout, stderr) => {
+        if (err && (err as NodeJS.ErrnoException).code === 'ENOENT') {
+          fail(new SvnError('The svn command-line client was not found. Install it and make sure `svn` is on PATH (TortoiseSVN: enable "command line client tools").', 'missing'))
+          return
+        }
+        if (err && (err as { killed?: boolean }).killed) {
+          fail(new SvnError(`svn ${args[0]} timed out after ${Math.round(timeoutMs / 1000)} s.`, 'timeout'))
+          return
+        }
+        const code = err ? (typeof (err as { code?: unknown }).code === 'number' ? ((err as { code: number }).code) : 1) : 0
+        done({ stdout: String(stdout), stderr: String(stderr), code })
+      }
+    )
+  })
+
+/** Maps svn's stderr to a friendly error. */
+export function mapError(stderr: string): SvnError {
+  const first = stderr.split(/\r?\n/).find((l) => l.trim()) ?? 'svn failed'
+  const has = (...codes: string[]) => codes.some((c) => stderr.includes(c))
+  if (has('E155007', 'E155010')) return new SvnError('This folder is not an SVN working copy.', 'not-wc', first)
+  if (has('E215004', 'E170001', 'E170013', 'E230001'))
+    return new SvnError('SVN needs your login. Run `svn update` once in a terminal and let it save your credentials, then try again.', 'auth', first)
+  if (has('E155011', 'E160028', 'E160024', 'E170004', 'out of date', 'out-of-date'))
+    return new SvnError('Out of date — run Update first, then commit again.', 'out-of-date', first)
+  if (has('E155015', 'remains in conflict', 'E155004'))
+    return new SvnError('There are conflicts (or a locked working copy). Resolve them (or run cleanup) first.', 'conflict', first)
+  return new SvnError(first.replace(/^svn: /, ''), 'other', first)
+}
+
+export const DEFAULT_TIMEOUT_MS = 30_000
+export const LONG_TIMEOUT_MS = 10 * 60_000
+
+export async function svn(run: SvnRunner, args: string[], cwd: string, timeoutMs = DEFAULT_TIMEOUT_MS): Promise<string> {
+  const r = await run(['--non-interactive', ...args], cwd, timeoutMs)
+  if (r.code !== 0) throw mapError(r.stderr || r.stdout)
+  return r.stdout
+}
+
+// ---------- XML ----------
+
+const ENTITIES: Record<string, string> = { amp: '&', lt: '<', gt: '>', quot: '"', apos: "'" }
+export function unescapeXml(s: string): string {
+  return s.replace(/&(#x[0-9a-f]+|#\d+|\w+);/gi, (m, e: string) => {
+    if (e[0] === '#') return String.fromCodePoint(e[1] === 'x' || e[1] === 'X' ? parseInt(e.slice(2), 16) : parseInt(e.slice(1), 10))
+    return ENTITIES[e] ?? m
+  })
+}
+
+function attr(tag: string, name: string): string | undefined {
+  const m = new RegExp(`\\s${name}\\s*=\\s*"([^"]*)"`).exec(tag)
+  return m ? unescapeXml(m[1]) : undefined
+}
+
+function inner(xml: string, name: string): string | undefined {
+  const m = new RegExp(`<${name}(?:\\s[^>]*)?>([\\s\\S]*?)</${name}>`).exec(xml)
+  return m ? unescapeXml(m[1].trim()) : undefined
+}
+
+export function parseInfo(xml: string): SvnInfo {
+  const entry = /<entry\b[^>]*>/.exec(xml)?.[0] ?? ''
+  const commit = /<commit\b[^>]*>/.exec(xml)?.[0] ?? ''
+  const rev = Number(attr(entry, 'revision'))
+  return {
+    url: inner(xml, 'url') ?? '',
+    relativeUrl: inner(xml, 'relative-url') ?? '',
+    root: inner(xml, 'wcroot-abspath') ?? '',
+    revision: Number.isFinite(rev) ? rev : null,
+    lastChangedRevision: Number(attr(commit, 'revision')) || null,
+    lastAuthor: inner(xml, 'author') ?? null
+  }
+}
+
+const STATUS_MAP: Record<string, FileStatus | undefined> = {
+  modified: 'modified',
+  replaced: 'modified',
+  added: 'added',
+  deleted: 'deleted',
+  conflicted: 'conflicted',
+  unversioned: 'unversioned',
+  missing: 'missing',
+  obstructed: 'missing'
+}
+
+/** `svn status --xml` → changed files with paths relative to `base` (forward slashes). */
+export function parseStatus(xml: string, base: string): SvnFile[] {
+  const files: SvnFile[] = []
+  const re = /<entry\b([^>]*)>([\s\S]*?)<\/entry>/g
+  let m: RegExpExecArray | null
+  while ((m = re.exec(xml))) {
+    const path = attr(m[1], 'path')
+    const wc = /<wc-status\b[^>]*>/.exec(m[2])?.[0]
+    if (!path || !wc) continue
+    const item = attr(wc, 'item') ?? 'normal'
+    const props = attr(wc, 'props') ?? 'none'
+    const tree = attr(wc, 'tree-conflicted') === 'true'
+    let status: FileStatus | undefined = tree || props === 'conflicted' ? 'conflicted' : STATUS_MAP[item]
+    if (!status && props === 'modified') status = 'modified'
+    if (!status) continue
+    const rel = isAbsolute(path) ? relative(base, path) : path
+    files.push({ path: rel.replace(/\\/g, '/'), status })
+  }
+  return files
+}
+
+/** "Committed revision 42." / "Updated to revision 42." / "At revision 42." */
+export function parseRevision(out: string): number | null {
+  const m = /(?:Committed|Updated to|At|Checked out) revision (\d+)/.exec(out)
+  return m ? Number(m[1]) : null
+}
+
+/** Paths reported as conflicted by `svn update` ("C  path"). */
+export function parseUpdateConflicts(out: string): string[] {
+  return out
+    .split(/\r?\n/)
+    .filter((l) => /^(C|.C|..C| {3}C)\s/.test(l) && !l.startsWith('Conflict'))
+    .map((l) => l.slice(5).trim())
+    .filter(Boolean)
+}
+
+// ---------- Safety ----------
+
+/** Resolves `rel` under `root`; throws when it escapes the working copy. */
+export function resolveInside(root: string, rel: string): string {
+  if (typeof rel !== 'string' || !rel.trim()) throw new SvnError('Empty path.', 'other')
+  const abs = resolve(root, rel)
+  const r = relative(resolve(root), abs)
+  if (r.startsWith('..') || isAbsolute(r)) throw new SvnError(`Refusing a path outside the working copy: ${rel}`, 'other')
+  return abs
+}
+
+function safeFiles(root: string, files: readonly string[]): string[] {
+  if (!files.length) throw new SvnError('No files selected.', 'other')
+  return files.map((f) => resolveInside(root, f))
+}
+
+// ---------- Operations (cwd = working copy path) ----------
+
+export async function info(run: SvnRunner, cwd: string): Promise<SvnInfo> {
+  return parseInfo(await svn(run, ['info', '--xml', '.'], cwd))
+}
+
+export async function status(run: SvnRunner, cwd: string, timeoutMs = DEFAULT_TIMEOUT_MS): Promise<SvnFile[]> {
+  return parseStatus(await svn(run, ['status', '--xml', '.'], cwd, timeoutMs), cwd)
+}
+
+export async function update(run: SvnRunner, cwd: string): Promise<{ revision: number | null; conflicts: string[] }> {
+  const out = await svn(run, ['update', '.'], cwd, LONG_TIMEOUT_MS)
+  return { revision: parseRevision(out), conflicts: parseUpdateConflicts(out) }
+}
+
+export async function add(run: SvnRunner, cwd: string, files: readonly string[]): Promise<void> {
+  await svn(run, ['add', '--parents', '--', ...safeFiles(cwd, files)], cwd)
+}
+
+export async function revert(run: SvnRunner, cwd: string, files: readonly string[]): Promise<void> {
+  await svn(run, ['revert', '--', ...safeFiles(cwd, files)], cwd)
+}
+
+export async function resolveConflict(run: SvnRunner, cwd: string, files: readonly string[]): Promise<void> {
+  await svn(run, ['resolve', '--accept', 'working', '--', ...safeFiles(cwd, files)], cwd)
+}
+
+/** Commits exactly `files`; unversioned ones in `toAdd` are added first. Returns the new revision. */
+export async function commit(
+  run: SvnRunner,
+  cwd: string,
+  files: readonly string[],
+  message: string,
+  toAdd: readonly string[] = []
+): Promise<number | null> {
+  if (!message.trim()) throw new SvnError('Enter a commit message.', 'other')
+  const paths = safeFiles(cwd, files)
+  if (toAdd.length) await add(run, cwd, toAdd)
+  const dir = mkdtempSync(join(tmpdir(), 'orca-svn-'))
+  const msgFile = join(dir, 'message.txt')
+  try {
+    writeFileSync(msgFile, message, 'utf8')
+    const out = await svn(run, ['commit', '-F', msgFile, '--encoding', 'utf-8', '--', ...paths], cwd, LONG_TIMEOUT_MS)
+    return parseRevision(out)
+  } finally {
+    rmSync(dir, { recursive: true, force: true })
+  }
+}
+
+/** Double-quotes a relative path for a terminal command line (bash, PowerShell, cmd). Paths with
+ *  characters a shell would expand inside double quotes are refused. */
+export function quoteArg(s: string): string {
+  if (/["`$%!\r\n]/.test(s)) throw new SvnError(`Cannot open this path in a terminal safely: ${s}`, 'other')
+  return `"${s}"`
+}
