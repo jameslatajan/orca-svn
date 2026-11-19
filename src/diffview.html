@@ -1,0 +1,117 @@
+<!doctype html>
+<html>
+<head>
+<meta charset="utf-8" />
+<style>
+  :root { color-scheme: light dark; }
+  * { box-sizing: border-box; }
+  body { margin: 0; font: 13px var(--orca-font-sans, system-ui, sans-serif); background: var(--orca-background, #fff); color: var(--orca-foreground, #171717); }
+  .muted { color: var(--orca-muted-foreground, #737373); }
+  header { position: sticky; top: 0; z-index: 2; background: var(--orca-background, #fff); border-bottom: 1px solid var(--orca-border, #e5e5e5); padding: 10px 16px; }
+  header h1 { font-size: 14px; margin: 0 0 2px; }
+  .bar { display: flex; flex-wrap: wrap; align-items: center; gap: 8px 14px; margin-top: 6px; font-size: 12px; }
+  button { font: inherit; font-size: 12px; color: inherit; background: transparent; border: 1px solid var(--orca-border, #e5e5e5); border-radius: 6px; padding: 2px 8px; cursor: pointer; }
+  button:hover { background: var(--orca-accent, #f5f5f5); color: var(--orca-accent-foreground, inherit); }
+  .add { color: #16a34a; } .del { color: #dc2626; }
+  main { padding: 12px 16px 40px; }
+  .toc { margin: 0 0 14px; padding: 0; list-style: none; font: 12px var(--orca-font-mono, ui-monospace, monospace); }
+  .toc li { display: flex; gap: 10px; padding: 2px 0; }
+  .toc a { color: inherit; text-decoration: none; flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .toc a:hover { text-decoration: underline; }
+  .file { border: 1px solid var(--orca-border, #e5e5e5); border-radius: 8px; margin-bottom: 14px; overflow: hidden; }
+  .fhead { display: flex; align-items: center; gap: 10px; padding: 6px 10px; background: var(--orca-muted, #f5f5f5); cursor: pointer; user-select: none; }
+  .fhead .path { font: 600 12px var(--orca-font-mono, ui-monospace, monospace); flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .fhead .chev { width: 12px; transition: transform .15s; }
+  .file.closed .chev { transform: rotate(-90deg); }
+  .file.closed .body { display: none; }
+  .body { overflow-x: auto; }
+  table { border-collapse: collapse; width: 100%; font: 12px/1.5 var(--orca-font-mono, ui-monospace, monospace); }
+  td { padding: 0 8px; white-space: pre; vertical-align: top; }
+  td.n { width: 1%; text-align: right; color: var(--orca-muted-foreground, #737373); user-select: none; opacity: .8; }
+  td.s { width: 1%; padding: 0 2px 0 6px; user-select: none; }
+  tr.a { background: rgba(22, 163, 74, .14); } tr.a td.s { color: #16a34a; }
+  tr.d { background: rgba(220, 38, 38, .14); } tr.d td.s { color: #dc2626; }
+  tr.h td { background: rgba(37, 99, 235, .08); color: var(--orca-muted-foreground, #737373); padding-top: 2px; padding-bottom: 2px; }
+  .wrap td.c { white-space: pre-wrap; word-break: break-all; }
+  .note { padding: 10px; font-size: 12px; }
+  .empty { padding: 30px; text-align: center; }
+</style>
+</head>
+<body>
+<header id="head"></header>
+<main id="main"><div class="empty muted">Loading diff…</div></main>
+<script>
+(() => {
+  const $ = (id) => document.getElementById(id)
+  const esc = (s) => String(s).replace(/[&<>"]/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' })[c])
+  let wrap = false
+
+  /** Unified `svn diff` text → { title, files: [{ path, note, hunks: [{ header, lines: [{ t, o, n, text }] }] }] } */
+  function parse(text) {
+    const lines = text.replace(/\r\n?/g, '\n').split('\n')
+    const meta = []
+    const files = []
+    let f = null, h = null, o = 0, n = 0
+    for (const line of lines) {
+      if (line.startsWith('# ') && !files.length) { meta.push(line.slice(2)); continue }
+      if (line.startsWith('Index: ')) { f = { path: line.slice(7), notes: [], hunks: [], add: 0, del: 0 }; files.push(f); h = null; continue }
+      if (!f) continue
+      if (/^=+$/.test(line) || line.startsWith('--- ') && !h || line.startsWith('+++ ') && !h) continue
+      const m = /^@@ -(\d+)(?:,\d+)? \+(\d+)(?:,\d+)? @@(.*)$/.exec(line)
+      if (m) { o = +m[1]; n = +m[2]; h = { header: line, lines: [] }; f.hunks.push(h); continue }
+      if (!h) { if (line.trim()) f.notes.push(line); continue }
+      if (line.startsWith('+')) { h.lines.push({ t: 'a', o: '', n: n++, text: line.slice(1) }); f.add++ }
+      else if (line.startsWith('-')) { h.lines.push({ t: 'd', o: o++, n: '', text: line.slice(1) }); f.del++ }
+      else if (line.startsWith('\\')) h.lines.push({ t: 'x', o: '', n: '', text: line })
+      else if (line.startsWith(' ') || line === '') h.lines.push({ t: 'c', o: o++, n: n++, text: line.slice(1) })
+      else f.notes.push(line)
+    }
+    // Drop a trailing empty context line svn output ends with.
+    for (const fl of files) for (const hk of fl.hunks) while (hk.lines.length && hk.lines[hk.lines.length - 1].t === 'c' && hk.lines[hk.lines.length - 1].text === '' && hk === fl.hunks[fl.hunks.length - 1]) hk.lines.pop()
+    return { meta, files }
+  }
+
+  function render(text) {
+    const { meta, files } = parse(text)
+    const add = files.reduce((s, f) => s + f.add, 0), del = files.reduce((s, f) => s + f.del, 0)
+    const title = meta[0] || 'Diff'
+    $('head').innerHTML = `<h1>${esc(title)}</h1>${meta.slice(1).map((m) => `<div class="muted" style="font-size:12px">${esc(m)}</div>`).join('')}
+      <div class="bar"><span>${files.length} file${files.length === 1 ? '' : 's'}</span><span class="add">+${add}</span><span class="del">−${del}</span>
+      <span style="flex:1"></span><button id="expand">Expand all</button><button id="collapse">Collapse all</button><button id="wrap">${wrap ? 'No wrap' : 'Wrap lines'}</button></div>`
+    document.documentElement.style.setProperty('--hh', $('head').offsetHeight + 'px')
+    if (!files.length) { $('main').innerHTML = `<div class="empty muted">No content changes (properties or copies only).</div>`; bind(); return }
+    const toc = files.length > 1 ? `<ul class="toc">${files.map((f, i) => `<li><a href="#f${i}">${esc(f.path)}</a><span class="add">+${f.add}</span><span class="del">−${f.del}</span></li>`).join('')}</ul>` : ''
+    const big = files.length > 30
+    $('main').className = wrap ? 'wrap' : ''
+    $('main').innerHTML = toc + files.map((f, i) => {
+      const rows = f.hunks.map((h) => `<tr class="h"><td class="n"></td><td class="n"></td><td class="s"></td><td class="c">${esc(h.header)}</td></tr>` +
+        h.lines.map((l) => `<tr class="${l.t}"><td class="n">${l.o}</td><td class="n">${l.n}</td><td class="s">${l.t === 'a' ? '+' : l.t === 'd' ? '−' : ''}</td><td class="c">${esc(l.text) || ' '}</td></tr>`).join('')).join('')
+      const notes = f.notes.length ? `<div class="note muted">${f.notes.map(esc).join('<br>')}</div>` : ''
+      return `<section class="file${big && i > 0 ? ' closed' : ''}" id="f${i}">
+        <div class="fhead"><span class="chev">▾</span><span class="path" title="${esc(f.path)}">${esc(f.path)}</span><span class="add">+${f.add}</span><span class="del">−${f.del}</span></div>
+        <div class="body">${notes}${rows ? `<table>${rows}</table>` : (notes ? '' : '<div class="note muted">No line changes.</div>')}</div></section>`
+    }).join('')
+    bind()
+  }
+
+  function bind() {
+    document.querySelectorAll('.fhead').forEach((el) => el.addEventListener('click', () => el.parentElement.classList.toggle('closed')))
+    document.querySelectorAll('.toc a').forEach((a) => a.addEventListener('click', (e) => {
+      e.preventDefault()
+      const s = document.querySelector(a.getAttribute('href'))
+      s.classList.remove('closed')
+      window.scrollTo({ top: s.offsetTop - $('head').offsetHeight - 4 })
+    }))
+    const all = (closed) => document.querySelectorAll('.file').forEach((s) => s.classList.toggle('closed', closed))
+    $('expand') && $('expand').addEventListener('click', () => all(false))
+    $('collapse') && $('collapse').addEventListener('click', () => all(true))
+    $('wrap') && $('wrap').addEventListener('click', () => { wrap = !wrap; $('main').className = wrap ? 'wrap' : ''; $('wrap').textContent = wrap ? 'No wrap' : 'Wrap lines' })
+  }
+
+  // EditorContent is { kind: 'text', text } or { kind: 'bytes', bytes }.
+  const text = (c) => (c && c.kind === 'bytes' ? new TextDecoder().decode(c.bytes) : (c && c.text) || '')
+  orca.document.onDidChange((doc) => render(text(doc.content)))
+})()
+</script>
+</body>
+</html>

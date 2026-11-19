@@ -1,7 +1,9 @@
 // The plugin's worker: reads SVN state for the focused workspace and runs svn actions.
 import type { OrcaWorkerApi } from 'orca/worker'
 import type { ActionResult, SvnState } from './protocol'
+import { isAbsolute, relative } from 'node:path'
 import * as svn from './svn'
+import { loadHistory, type LaneUrls } from './history'
 import { watchFolder, type FolderWatch } from './watch'
 
 /** Injection points and timings; tests change them. */
@@ -35,6 +37,26 @@ const isRemote = (ws: Focus) => !!ws.hostId && ws.hostId !== 'local'
 const invalid = (message: string) => Object.assign(new Error(message), { code: 'invalid_params' })
 const errText = (err: unknown) => (err instanceof Error ? err.message : String(err))
 
+/** Server HEAD per URL, cached for a minute so file edits do not hit the server; null when offline. */
+const heads = new Map<string, { at: number; head: number | null }>()
+export const HEAD_TTL_MS = 60_000
+async function headOf(cwd: string, url: string): Promise<number | null> {
+  const hit = heads.get(url)
+  if (hit && Date.now() - hit.at < HEAD_TTL_MS) return hit.head
+  let head: number | null = null
+  try {
+    head = await svn.headRevision(options.runner, cwd, url)
+  } catch {
+    head = null
+  }
+  heads.set(url, { at: Date.now(), head })
+  return head
+}
+/** Forget cached HEADs: after an update, switch or commit the answer changes. */
+export function forgetHeads(): void {
+  heads.clear()
+}
+
 export async function readState(orca: OrcaWorkerApi): Promise<SvnState> {
   let workspace: string | undefined
   try {
@@ -44,7 +66,9 @@ export async function readState(orca: OrcaWorkerApi): Promise<SvnState> {
     if (isRemote(ws)) return { status: 'remote', workspace, files: [] }
     const info = await svn.info(options.runner, ws.path)
     const files = await svn.status(options.runner, ws.path, options.statusTimeoutMs)
-    return { status: 'ok', workspace, info, files }
+    const head = await headOf(ws.path, info.url)
+    const rev = info.revision ?? 0
+    return { status: 'ok', workspace, info, files, ...(head != null && rev < head ? { behind: { head } } : {}) }
   } catch (err) {
     if (err instanceof svn.SvnError && err.kind === 'not-wc') return { status: 'not-wc', workspace, files: [] }
     if (err instanceof svn.SvnError && err.kind === 'missing') return { status: 'svn-missing', workspace, files: [], error: err.message }
@@ -122,6 +146,7 @@ export default function activate(orca: OrcaWorkerApi): void {
     const ws = await local()
     try {
       const value = await fn(ws)
+      forgetHeads()
       return { message: message(value), state: await refresh(), value }
     } catch (err) {
       if (err instanceof svn.SvnError) throw invalid(err.message)
@@ -187,6 +212,87 @@ export default function activate(orca: OrcaWorkerApi): void {
     }
   })
   orca.panels.handle('svn.log', () => openTerminal('svn log', 'svn log -l 20'))
+
+  // ---------- History ----------
+  /** Lane id → URL from the last history load; requests name lanes, never raw URLs. */
+  let laneUrls: LaneUrls = new Map()
+
+  const laneUrl = (lane: string) => {
+    const url = laneUrls.get(lane)
+    if (!url) throw invalid('Unknown branch; refresh the history.')
+    return url
+  }
+  const checkRev = (r: unknown) => {
+    if (typeof r !== 'number' || !Number.isInteger(r) || r < 0) throw invalid('Bad revision.')
+    return r
+  }
+  const svnInvalid = async <T>(fn: () => Promise<T>): Promise<T> => {
+    try {
+      return await fn()
+    } catch (err) {
+      if (err instanceof svn.SvnError) throw invalid(err.message)
+      throw err
+    }
+  }
+  orca.panels.handle('svn.history', async () => {
+    const ws = await local()
+    return svnInvalid(async () => {
+      const { graph, urls } = await loadHistory(options.runner, ws.path, (p) => orca.panels.post('svn.historyProgress', p))
+      laneUrls = urls
+      return graph
+    })
+  })
+  orca.panels.handle('svn.revision', async ({ lane, revision }) => {
+    const ws = await local()
+    const rev = checkRev(revision)
+    return svnInvalid(async () => {
+      const [e] = await svn.log(options.runner, ws.path, laneUrl(lane), { limit: 1, verbose: true, revision: rev })
+      if (!e) throw invalid(`Revision ${rev} not found.`)
+      return {
+        revision: e.revision,
+        author: e.author,
+        date: e.date,
+        message: e.message,
+        paths: e.paths.map((p) => ({ action: p.action, path: p.path, ...(p.copyFromPath ? { copyFrom: `${p.copyFromPath}@${p.copyFromRev}` } : {}) }))
+      }
+    })
+  })
+  orca.panels.handle('svn.openDiff', async ({ lane, revision }) => {
+    const ws = await local()
+    const rev = checkRev(revision)
+    const url = laneUrl(lane)
+    return svnInvalid(async () => {
+      const [{ text, truncated }, info] = await Promise.all([
+        svn.diffRevision(options.runner, ws.path, url, rev, 20_000_000),
+        svn.info(options.runner, ws.path)
+      ])
+      const header = `# r${rev} on ${lane.replace(/^b:/, '')}  (${url})\n` + (truncated ? '# Cut off at 20 MB.\n' : '') + '\n'
+      const name = `r${rev}-${lane.replace(/^b:/, '').replace(/[^\w.-]+/g, '_')}.svndiff`
+      const file = svn.saveDiff(svn.diffDir(ws.path, info.root), name, header + (text || '# No content changes (properties or copies only).\n'))
+      const rel = relative(ws.path, file).replace(/\\/g, '/')
+      const inside = !(rel.startsWith('..') || isAbsolute(rel))
+      orca.log(`openDiff: wrote ${file} (${text.length} bytes); opening in workspace ${ws.workspaceId}`)
+      // Try the workspace-relative path first, then the absolute one.
+      const tries = inside ? [rel, file] : [file]
+      let last: unknown
+      for (const path of tries) {
+        try {
+          await orca.host.call('editor.open', { workspaceId: ws.workspaceId, path })
+          orca.log(`openDiff: opened ${path}`)
+          return { path }
+        } catch (err) {
+          last = err
+          orca.log(`openDiff: editor.open(${path}) failed: ${errText(err)}`)
+        }
+      }
+      throw invalid(`Orca could not open ${rel}: ${errText(last)}`)
+    })
+  })
+  orca.panels.handle('svn.switch', async ({ lane }) => {
+    const url = laneUrl(lane)
+    const { message, state } = await act((ws) => svn.switchTo(options.runner, ws.path, url), (r) => `Switched to ${lane.replace(/^b:/, '')}${r != null ? ` at r${r}` : ''}.`)
+    return { message, state }
+  })
 
   orca.events.on('workspace.changed', () => void refresh())
 

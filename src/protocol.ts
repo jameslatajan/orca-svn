@@ -20,10 +20,42 @@ export type SvnState = {
   info?: SvnInfo
   files: SvnFile[]
   error?: string
+  /** Latest revision on the server that changed this URL, when newer than the working copy. */
+  behind?: { head: number }
 }
 
 /** What an action reports back to the panel, plus fresh state. */
 export type ActionResult = { message: string; state: SvnState }
+
+/** One line of history: trunk or a branch. */
+export type HistoryLane = {
+  id: string
+  name: string
+  kind: 'trunk' | 'branch'
+  /** The working copy is on this lane. */
+  current: boolean
+  /** Lane and revision it was copied from. */
+  from?: { lane: string; revision: number }
+}
+export type HistoryRev = { revision: number; lane: string; author: string; date: string; message: string }
+export type HistoryTag = { name: string; lane: string; revision: number }
+export type HistoryMerge = { fromLane: string; fromRevision: number; toLane: string; toRevision: number }
+export type HistoryGraph = {
+  lanes: HistoryLane[]
+  /** Newest first, across all lanes. */
+  revisions: HistoryRev[]
+  tags: HistoryTag[]
+  merges: HistoryMerge[]
+  /** False when the URL has no trunk/branches/tags: only the current line is shown. */
+  standardLayout: boolean
+}
+export type RevisionDetail = {
+  revision: number
+  author: string
+  date: string
+  message: string
+  paths: { action: string; path: string; copyFrom?: string }[]
+}
 
 declare module 'orca' {
   interface PluginRequests {
@@ -39,11 +71,21 @@ declare module 'orca' {
     'svn.diff': { input: { file: string }; output: { terminalId: string } }
     /** Opens `svn log -l 20` in a new terminal. */
     'svn.log': { output: { terminalId: string } }
+    /** Revision tree of trunk, recent branches and tags (contacts the server). */
+    'svn.history': { output: HistoryGraph }
+    /** Changed paths of one revision on a lane from the last `svn.history`. */
+    'svn.revision': { input: { lane: string; revision: number }; output: RevisionDetail }
+    /** Saves `svn diff -c REV` under .svn/orca-diffs and opens it in an editor tab. */
+    'svn.openDiff': { input: { lane: string; revision: number }; output: { path: string } }
+    /** `svn switch` the working copy to a lane. */
+    'svn.switch': { input: { lane: string }; output: ActionResult }
   }
   interface PluginPanelEvents {
     /** Fresh state after a workspace switch, file change, action or refresh. */
     'svn.changed': SvnState
     /** Asks the panel to focus the commit form (palette "SVN: Commit…"). */
     'svn.showCommit': Record<string, never>
+    /** Progress of a running `svn.history` load. */
+    'svn.historyProgress': { step: string; done: number; total: number }
   }
 }

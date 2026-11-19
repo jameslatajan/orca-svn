@@ -6,7 +6,8 @@ export type FolderWatch = { path: string; close(): void }
 /** True for events inside the working copy's own metadata folder. */
 export function isSvnMeta(file: string | null | undefined): boolean {
   if (!file) return false
-  return file.split(/[\\/]/).includes('.svn')
+  const parts = file.split(/[\\/]/)
+  return parts.includes('.svn') || parts.includes('.orca-svn-diffs')
 }
 
 export function watchFolder(

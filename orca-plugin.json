@@ -19,6 +19,22 @@
         "icon": "database",
         "entry": "src/panel.tsx",
         "ui": "components"
+      },
+      {
+        "id": "svn-history",
+        "title": "SVN History",
+        "icon": "branch",
+        "entry": "src/history.html",
+        "ui": "html"
+      }
+    ],
+    "customEditors": [
+      {
+        "id": "svn-diff",
+        "title": "SVN Diff",
+        "extensions": [".svndiff"],
+        "entry": "src/diffview.html",
+        "priority": "default"
       }
     ],
     "commands": [
@@ -32,6 +48,7 @@
   "capabilities": [
     { "kind": "storage:own" },
     { "kind": "workspace:read" },
+    { "kind": "workspace:write" },
     { "kind": "terminal:send" },
     { "kind": "notifications:show" }
   ]
