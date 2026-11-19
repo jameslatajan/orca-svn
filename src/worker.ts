@@ -201,15 +201,35 @@ export default function activate(orca: OrcaWorkerApi): void {
     const ws = await local()
     return orca.host.call('terminal.create', { workspaceId: ws.workspaceId, title, command })
   }
+  /** Saves `content` as a .svndiff file and opens it in an SVN Diff editor tab. */
+  const openDiffTab = async (ws: { path: string; workspaceId: string }, wcRoot: string | undefined, name: string, content: string) => {
+    const file = svn.saveDiff(svn.diffDir(ws.path, wcRoot), name, content)
+    const rel = relative(ws.path, file).replace(/\\/g, '/')
+    const inside = !(rel.startsWith('..') || isAbsolute(rel))
+    orca.log(`openDiff: wrote ${file} (${content.length} bytes); opening in workspace ${ws.workspaceId}`)
+    // Try the workspace-relative path first, then the absolute one.
+    const tries = inside ? [rel, file] : [file]
+    let last: unknown
+    for (const path of tries) {
+      try {
+        await orca.host.call('editor.open', { workspaceId: ws.workspaceId, path })
+        orca.log(`openDiff: opened ${path}`)
+        return { path }
+      } catch (err) {
+        last = err
+        orca.log(`openDiff: editor.open(${path}) failed: ${errText(err)}`)
+      }
+    }
+    throw invalid(`Orca could not open ${rel}: ${errText(last)}`)
+  }
   orca.panels.handle('svn.diff', async ({ file }) => {
     const ws = await local()
-    try {
-      svn.resolveInside(ws.path, file)
-      return await openTerminal(`svn diff ${file}`, `svn diff -- ${svn.quoteArg(file)}`)
-    } catch (err) {
-      if (err instanceof svn.SvnError) throw invalid(err.message)
-      throw err
-    }
+    return svnInvalid(async () => {
+      const [{ text, truncated }, info] = await Promise.all([svn.diffWorking(options.runner, ws.path, file, 20_000_000), svn.info(options.runner, ws.path)])
+      const header = `# ${file}: working copy vs BASE\n` + (truncated ? '# Cut off at 20 MB.\n' : '') + '\n'
+      const name = `wc-${file.replace(/[^\w.-]+/g, '_')}.svndiff`
+      return openDiffTab(ws, info.root, name, header + (text || '# No content changes.\n'))
+    })
   })
   orca.panels.handle('svn.log', () => openTerminal('svn log', 'svn log -l 20'))
 
@@ -268,24 +288,7 @@ export default function activate(orca: OrcaWorkerApi): void {
       ])
       const header = `# r${rev} on ${lane.replace(/^b:/, '')}  (${url})\n` + (truncated ? '# Cut off at 20 MB.\n' : '') + '\n'
       const name = `r${rev}-${lane.replace(/^b:/, '').replace(/[^\w.-]+/g, '_')}.svndiff`
-      const file = svn.saveDiff(svn.diffDir(ws.path, info.root), name, header + (text || '# No content changes (properties or copies only).\n'))
-      const rel = relative(ws.path, file).replace(/\\/g, '/')
-      const inside = !(rel.startsWith('..') || isAbsolute(rel))
-      orca.log(`openDiff: wrote ${file} (${text.length} bytes); opening in workspace ${ws.workspaceId}`)
-      // Try the workspace-relative path first, then the absolute one.
-      const tries = inside ? [rel, file] : [file]
-      let last: unknown
-      for (const path of tries) {
-        try {
-          await orca.host.call('editor.open', { workspaceId: ws.workspaceId, path })
-          orca.log(`openDiff: opened ${path}`)
-          return { path }
-        } catch (err) {
-          last = err
-          orca.log(`openDiff: editor.open(${path}) failed: ${errText(err)}`)
-        }
-      }
-      throw invalid(`Orca could not open ${rel}: ${errText(last)}`)
+      return openDiffTab(ws, info.root, name, header + (text || '# No content changes (properties or copies only).\n'))
     })
   })
   orca.panels.handle('svn.switch', async ({ lane }) => {

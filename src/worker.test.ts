@@ -15,6 +15,7 @@ function host(path: string, hostId = 'local') {
         truncated: false
       },
       'terminal.create': { terminalId: 't9' },
+      'editor.open': { opened: true },
       'notifications.show': { delivered: true }
     }
   })
@@ -22,7 +23,7 @@ function host(path: string, hostId = 'local') {
 
 const wait = (ms: number) => new Promise((r) => setTimeout(r, ms))
 
-test('worker: state, commit selected files, diff in a terminal', async () => {
+test('worker: state, commit selected files, diff in an editor tab', async () => {
   const { wc } = tempRepo()
   appendFileSync(join(wc, 'a.txt'), 'more\n')
   writeFileSync(join(wc, 'new.txt'), 'n\n')
@@ -42,8 +43,10 @@ test('worker: state, commit selected files, diff in a terminal', async () => {
   assert.equal(r.message, 'Committed revision 2.')
   assert.deepEqual(r.state.files.map((f) => f.path), ['a.txt'])
 
-  await worker.request('svn.diff', { file: 'a.txt' })
-  assert.deepEqual(h.callsOf('terminal.create'), [{ workspaceId: 'w1', title: 'svn diff a.txt', command: 'svn diff -- "a.txt"' }])
+  const d = (await worker.request('svn.diff', { file: 'a.txt' })) as { path: string }
+  assert.ok(d.path.endsWith('wc-a.txt.svndiff'))
+  assert.deepEqual(h.callsOf('editor.open'), [{ workspaceId: 'w1', path: d.path }])
+  assert.equal(h.callsOf('terminal.create').length, 0)
   await assert.rejects(worker.request('svn.diff', { file: '../x.txt' }), /outside the working copy/)
   await assert.rejects(worker.request('svn.commit', { files: ['a.txt'], message: '  ' }), /commit message/)
   await worker.deactivate()

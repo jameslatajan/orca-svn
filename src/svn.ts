@@ -361,6 +361,12 @@ export async function diffRevision(run: SvnRunner, cwd: string, url: string, rev
   return out.length > maxBytes ? { text: out.slice(0, maxBytes), truncated: true } : { text: out, truncated: false }
 }
 
+/** `svn diff` of one working-copy file, cut at `maxBytes`. */
+export async function diffWorking(run: SvnRunner, cwd: string, file: string, maxBytes = MAX_DIFF_BYTES): Promise<{ text: string; truncated: boolean }> {
+  const out = await svn(run, ['diff', '--', resolveInside(cwd, file)], cwd, LONG_TIMEOUT_MS)
+  return out.length > maxBytes ? { text: out.slice(0, maxBytes), truncated: true } : { text: out, truncated: false }
+}
+
 export async function switchTo(run: SvnRunner, cwd: string, url: string): Promise<number | null> {
   return parseRevision(await svn(run, ['switch', url, '.'], cwd, LONG_TIMEOUT_MS))
 }

@@ -68,8 +68,8 @@ declare module 'orca' {
     'svn.revert': { input: { files: string[] }; output: ActionResult }
     'svn.add': { input: { files: string[] }; output: ActionResult }
     'svn.resolve': { input: { files: string[] }; output: ActionResult }
-    /** Opens `svn diff <file>` in a new terminal. */
-    'svn.diff': { input: { file: string }; output: { terminalId: string } }
+    /** Opens `svn diff <file>` in an SVN Diff editor tab. */
+    'svn.diff': { input: { file: string }; output: { path: string } }
     /** Opens `svn log -l 20` in a new terminal. */
     'svn.log': { output: { terminalId: string } }
     /** Revision tree of trunk, recent branches and tags (contacts the server). */
