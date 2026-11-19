@@ -2,6 +2,7 @@
 import type { OrcaWorkerApi } from 'orca/worker'
 import type { ActionResult, SvnState } from './protocol'
 import * as svn from './svn'
+import { loadHistory, type LaneUrls } from './history'
 import { watchFolder, type FolderWatch } from './watch'
 
 /** Injection points and timings; tests change them. */
@@ -187,6 +188,69 @@ export default function activate(orca: OrcaWorkerApi): void {
     }
   })
   orca.panels.handle('svn.log', () => openTerminal('svn log', 'svn log -l 20'))
+
+  // ---------- History ----------
+  /** Lane id → URL from the last history load; requests name lanes, never raw URLs. */
+  let laneUrls: LaneUrls = new Map()
+  let currentLane: string | null = null
+  const laneUrl = (lane: string) => {
+    const url = laneUrls.get(lane)
+    if (!url) throw invalid('Unknown branch; refresh the history.')
+    return url
+  }
+  const checkRev = (r: unknown) => {
+    if (typeof r !== 'number' || !Number.isInteger(r) || r < 0) throw invalid('Bad revision.')
+    return r
+  }
+  const svnInvalid = async <T>(fn: () => Promise<T>): Promise<T> => {
+    try {
+      return await fn()
+    } catch (err) {
+      if (err instanceof svn.SvnError) throw invalid(err.message)
+      throw err
+    }
+  }
+  orca.panels.handle('svn.history', async () => {
+    const ws = await local()
+    return svnInvalid(async () => {
+      const { graph, urls } = await loadHistory(options.runner, ws.path)
+      laneUrls = urls
+      currentLane = graph.lanes.find((l) => l.current)?.id ?? null
+      return graph
+    })
+  })
+  orca.panels.handle('svn.revision', async ({ lane, revision }) => {
+    const ws = await local()
+    const rev = checkRev(revision)
+    return svnInvalid(async () => {
+      const [e] = await svn.log(options.runner, ws.path, laneUrl(lane), { limit: 1, verbose: true, revision: rev })
+      if (!e) throw invalid(`Revision ${rev} not found.`)
+      return {
+        revision: e.revision,
+        author: e.author,
+        date: e.date,
+        message: e.message,
+        paths: e.paths.map((p) => ({ action: p.action, path: p.path, ...(p.copyFromPath ? { copyFrom: `${p.copyFromPath}@${p.copyFromRev}` } : {}) }))
+      }
+    })
+  })
+  orca.panels.handle('svn.diffRevision', async ({ lane, revision }) => {
+    const rev = checkRev(revision)
+    const url = laneUrl(lane)
+    return svnInvalid(async () => openTerminal(`svn diff r${rev}`, `svn diff -c ${rev} ${svn.quoteArg(url)}`))
+  })
+  orca.panels.handle('svn.updateTo', async ({ lane, revision }) => {
+    const rev = checkRev(revision)
+    if (lane !== currentLane) throw invalid('Switch to that branch first.')
+    const { message, state } = await act((ws) => svn.updateTo(options.runner, ws.path, rev), (r) => `Updated to revision ${r ?? rev}.`)
+    return { message, state }
+  })
+  orca.panels.handle('svn.switch', async ({ lane }) => {
+    const url = laneUrl(lane)
+    const { message, state } = await act((ws) => svn.switchTo(options.runner, ws.path, url), (r) => `Switched to ${lane.replace(/^b:/, '')}${r != null ? ` at r${r}` : ''}.`)
+    currentLane = lane
+    return { message, state }
+  })
 
   orca.events.on('workspace.changed', () => void refresh())
 

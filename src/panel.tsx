@@ -202,14 +202,12 @@ function CommitBox(props: { files: SvnFile[] }) {
   return (
     <Stack gap="xs" align="stretch">
       <Textarea label="Commit message" labelHidden placeholder="Commit message (Ctrl+Enter to commit)" rows={2} value={msg} disabled={!!b} onChange={(v) => set(message, v)} onSubmit={() => !reason && void commit()} />
-      <Row justify="between" align="center" gap="xs">
-        <Text muted size="xs">
-          {reason ?? `${n} of ${total} selected`}
-        </Text>
-        <Button variant="solid" tone="accent" icon="check" disabled={!!b || !!reason} onPress={commit}>
-          {b === 'commit' ? 'Committing…' : n ? `Commit ${n} ${n === 1 ? 'file' : 'files'}` : 'Commit'}
-        </Button>
-      </Row>
+      <Button variant="solid" tone="accent" icon="check" disabled={!!b || !!reason} onPress={commit}>
+        {b === 'commit' ? 'Committing…' : n ? `Commit ${n} ${n === 1 ? 'file' : 'files'}` : 'Commit'}
+      </Button>
+      <Text muted size="xs">
+        {reason ?? `${n} of ${total} selected`}
+      </Text>
     </Stack>
   )
 }

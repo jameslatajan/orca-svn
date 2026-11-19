@@ -215,3 +215,80 @@ export function quoteArg(s: string): string {
   if (/["`$%!\r\n]/.test(s)) throw new SvnError(`Cannot open this path in a terminal safely: ${s}`, 'other')
   return `"${s}"`
 }
+
+// ---------- History ----------
+
+export type LogPath = { action: string; kind: string; path: string; copyFromPath?: string; copyFromRev?: number }
+export type LogEntry = { revision: number; author: string; date: string; message: string; paths: LogPath[] }
+
+/** `svn log --xml [-v]` → entries, newest first as svn prints them. */
+export function parseLog(xml: string): LogEntry[] {
+  const out: LogEntry[] = []
+  const re = /<logentry\b([^>]*)>([\s\S]*?)<\/logentry>/g
+  let m: RegExpExecArray | null
+  while ((m = re.exec(xml))) {
+    const revision = Number(attr(m[1], 'revision'))
+    if (!Number.isFinite(revision)) continue
+    const paths: LogPath[] = []
+    const pre = /<path\b([^>]*)>([\s\S]*?)<\/path>/g
+    let p: RegExpExecArray | null
+    while ((p = pre.exec(m[2]))) {
+      const from = attr(p[1], 'copyfrom-path')
+      const fromRev = Number(attr(p[1], 'copyfrom-rev'))
+      paths.push({
+        action: attr(p[1], 'action') ?? 'M',
+        kind: attr(p[1], 'kind') ?? '',
+        path: unescapeXml(p[2].trim()),
+        ...(from ? { copyFromPath: from, copyFromRev: Number.isFinite(fromRev) ? fromRev : undefined } : {})
+      })
+    }
+    out.push({ revision, author: inner(m[2], 'author') ?? '', date: inner(m[2], 'date') ?? '', message: inner(m[2], 'msg') ?? '', paths })
+  }
+  return out
+}
+
+export type ListEntry = { name: string; kind: string; revision: number | null; date: string }
+
+/** `svn ls --xml URL` → children with their last-changed revision. */
+export function parseList(xml: string): ListEntry[] {
+  const out: ListEntry[] = []
+  const re = /<entry\b([^>]*)>([\s\S]*?)<\/entry>/g
+  let m: RegExpExecArray | null
+  while ((m = re.exec(xml))) {
+    const name = inner(m[2], 'name')
+    if (!name) continue
+    const commit = /<commit\b[^>]*>/.exec(m[2])?.[0] ?? ''
+    const rev = Number(attr(commit, 'revision'))
+    out.push({ name, kind: attr(m[1], 'kind') ?? '', revision: Number.isFinite(rev) ? rev : null, date: inner(m[2], 'date') ?? '' })
+  }
+  return out
+}
+
+export async function reposRoot(run: SvnRunner, cwd: string): Promise<string> {
+  return (await svn(run, ['info', '--show-item', 'repos-root-url', '.'], cwd)).trim()
+}
+
+export async function log(run: SvnRunner, cwd: string, url: string, opts: { limit: number; verbose?: boolean; stopOnCopy?: boolean; revision?: number }): Promise<LogEntry[]> {
+  const args = ['log', '--xml', '-l', String(opts.limit)]
+  if (opts.verbose) args.push('-v')
+  if (opts.stopOnCopy) args.push('--stop-on-copy')
+  if (opts.revision != null) args.push('-r', String(opts.revision))
+  return parseLog(await svn(run, [...args, url], cwd, LONG_TIMEOUT_MS))
+}
+
+export async function list(run: SvnRunner, cwd: string, url: string): Promise<ListEntry[]> {
+  return parseList(await svn(run, ['ls', '--xml', url], cwd))
+}
+
+export async function propget(run: SvnRunner, cwd: string, name: string, url: string): Promise<string> {
+  const r = await run(['--non-interactive', 'propget', name, url], cwd, DEFAULT_TIMEOUT_MS)
+  return r.code === 0 ? r.stdout : ''
+}
+
+export async function updateTo(run: SvnRunner, cwd: string, revision: number): Promise<number | null> {
+  return parseRevision(await svn(run, ['update', '-r', String(revision), '.'], cwd, LONG_TIMEOUT_MS))
+}
+
+export async function switchTo(run: SvnRunner, cwd: string, url: string): Promise<number | null> {
+  return parseRevision(await svn(run, ['switch', url, '.'], cwd, LONG_TIMEOUT_MS))
+}

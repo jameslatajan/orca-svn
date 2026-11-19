@@ -25,6 +25,36 @@ export type SvnState = {
 /** What an action reports back to the panel, plus fresh state. */
 export type ActionResult = { message: string; state: SvnState }
 
+/** One line of history: trunk or a branch. */
+export type HistoryLane = {
+  id: string
+  name: string
+  kind: 'trunk' | 'branch'
+  /** The working copy is on this lane. */
+  current: boolean
+  /** Lane and revision it was copied from. */
+  from?: { lane: string; revision: number }
+}
+export type HistoryRev = { revision: number; lane: string; author: string; date: string; message: string }
+export type HistoryTag = { name: string; lane: string; revision: number }
+export type HistoryMerge = { fromLane: string; fromRevision: number; toLane: string; toRevision: number }
+export type HistoryGraph = {
+  lanes: HistoryLane[]
+  /** Newest first, across all lanes. */
+  revisions: HistoryRev[]
+  tags: HistoryTag[]
+  merges: HistoryMerge[]
+  /** False when the URL has no trunk/branches/tags: only the current line is shown. */
+  standardLayout: boolean
+}
+export type RevisionDetail = {
+  revision: number
+  author: string
+  date: string
+  message: string
+  paths: { action: string; path: string; copyFrom?: string }[]
+}
+
 declare module 'orca' {
   interface PluginRequests {
     /** SVN state of the focused workspace. */
@@ -39,6 +69,16 @@ declare module 'orca' {
     'svn.diff': { input: { file: string }; output: { terminalId: string } }
     /** Opens `svn log -l 20` in a new terminal. */
     'svn.log': { output: { terminalId: string } }
+    /** Revision tree of trunk, recent branches and tags (contacts the server). */
+    'svn.history': { output: HistoryGraph }
+    /** Changed paths of one revision on a lane from the last `svn.history`. */
+    'svn.revision': { input: { lane: string; revision: number }; output: RevisionDetail }
+    /** Opens `svn diff -c REV <lane url>` in a terminal. */
+    'svn.diffRevision': { input: { lane: string; revision: number }; output: { terminalId: string } }
+    /** `svn update -r REV` the working copy (only on its own lane). */
+    'svn.updateTo': { input: { lane: string; revision: number }; output: ActionResult }
+    /** `svn switch` the working copy to a lane. */
+    'svn.switch': { input: { lane: string }; output: ActionResult }
   }
   interface PluginPanelEvents {
     /** Fresh state after a workspace switch, file change, action or refresh. */

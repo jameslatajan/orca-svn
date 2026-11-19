@@ -1,0 +1,239 @@
+<!doctype html>
+<html>
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<style>
+  :root { color-scheme: light dark; }
+  * { box-sizing: border-box; }
+  body {
+    margin: 0; font: 13px var(--orca-font-sans, system-ui, sans-serif);
+    background: var(--orca-background, #fff); color: var(--orca-foreground, #171717);
+  }
+  .muted { color: var(--orca-muted-foreground, #737373); }
+  .xs { font-size: 11px; }
+  header { display: flex; align-items: center; justify-content: space-between; gap: 8px; padding: 10px 12px 6px; }
+  header b { font-size: 13px; }
+  button {
+    font: inherit; font-size: 12px; color: inherit; background: transparent; cursor: pointer;
+    border: 1px solid var(--orca-border, #e5e5e5); border-radius: 6px; padding: 3px 8px;
+  }
+  button:hover:not(:disabled) { background: var(--orca-accent, #f5f5f5); color: var(--orca-accent-foreground, #171717); }
+  button:disabled { opacity: .5; cursor: default; }
+  button.icon { border: 0; padding: 3px 6px; font-size: 14px; }
+  .legend { display: flex; flex-wrap: wrap; gap: 4px 10px; padding: 0 12px 8px; font-size: 11px; }
+  .legend span { display: inline-flex; align-items: center; gap: 4px; white-space: nowrap; }
+  .legend i { width: 8px; height: 8px; border-radius: 50%; display: inline-block; }
+  .legend .cur { font-weight: 600; }
+  #graph { position: relative; border-top: 1px solid var(--orca-border, #e5e5e5); }
+  svg { position: absolute; left: 0; top: 0; pointer-events: none; }
+  .row { display: flex; align-items: center; height: 40px; padding-right: 10px; cursor: pointer; }
+  .row:hover { background: var(--orca-muted, #f5f5f5); }
+  .row.sel { background: var(--orca-accent, #eef2ff); color: var(--orca-accent-foreground, inherit); }
+  .txt { flex: 1; min-width: 0; }
+  .msg { white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+  .rev { font: 600 11px var(--orca-font-mono, ui-monospace, monospace); margin-right: 4px; }
+  .chip { font-size: 10px; padding: 0 5px; border-radius: 4px; border: 1px solid currentColor; margin-left: 4px; white-space: nowrap; }
+  #detail { position: sticky; bottom: 0; border-top: 1px solid var(--orca-border, #e5e5e5); background: var(--orca-card, #fff); padding: 10px 12px; max-height: 45%; overflow: auto; }
+  #detail:empty { display: none; }
+  .f { font: 11px var(--orca-font-mono, ui-monospace, monospace); padding: 1px 0; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+  .A { color: #16a34a; } .M { color: #2563eb; } .D { color: #dc2626; } .R { color: #d97706; }
+  .actions { display: flex; flex-wrap: wrap; gap: 6px; margin-top: 8px; }
+  .notice { margin: 8px 12px; padding: 6px 8px; border-radius: 6px; font-size: 12px; background: var(--orca-muted, #f5f5f5); }
+  .notice.err { color: var(--orca-destructive, #dc2626); }
+  .more { padding: 10px 12px; }
+</style>
+</head>
+<body>
+<header>
+  <div><b>History</b> <span id="where" class="muted xs"></span></div>
+  <button class="icon" id="refresh" title="Refresh history" aria-label="Refresh history">⟳</button>
+</header>
+<div id="notice"></div>
+<div id="legend" class="legend"></div>
+<div id="graph"></div>
+<div id="detail"></div>
+
+<script>
+(() => {
+  const COLORS = ['#2563eb', '#16a34a', '#d97706', '#9333ea', '#db2777', '#0891b2', '#65a30d', '#dc2626', '#7c3aed']
+  const ROW = 40, LANE = 14, PAD = 14
+  const $ = (id) => document.getElementById(id)
+  const esc = (s) => String(s ?? '').replace(/[&<>"']/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' })[c])
+  let graph = null, selected = null, busy = false, workspace = undefined
+
+  function ago(iso) {
+    const t = Date.parse(iso); if (!t) return ''
+    const s = Math.max(0, (Date.now() - t) / 1000)
+    if (s < 3600) return Math.round(s / 60) + 'm'
+    if (s < 86400) return Math.round(s / 3600) + 'h'
+    if (s < 86400 * 30) return Math.round(s / 86400) + 'd'
+    return new Date(t).toISOString().slice(0, 10)
+  }
+  function notice(text, err) { $('notice').innerHTML = text ? `<div class="notice${err ? ' err' : ''}">${esc(text)}</div>` : '' }
+  const errText = (e) => (e && e.message) || String(e)
+
+  async function load() {
+    if (busy) return
+    busy = true; $('refresh').disabled = true
+    notice('Loading history from the repository…')
+    try {
+      graph = await orca.plugin.request('svn.history')
+      notice(graph.standardLayout ? '' : 'No trunk/branches/tags layout found; showing this line only.')
+      render()
+      if (selected && !graph.revisions.some((r) => r.revision === selected.revision && r.lane === selected.lane)) selected = null
+      showDetail()
+    } catch (e) {
+      graph = null; render(); $('detail').innerHTML = ''
+      notice(errText(e), true)
+    } finally {
+      busy = false; $('refresh').disabled = false
+    }
+  }
+
+  function render() {
+    const g = $('graph'), lg = $('legend')
+    if (!graph || !graph.revisions.length) { g.innerHTML = graph ? '<div class="notice">No revisions.</div>' : ''; lg.innerHTML = ''; $('where').textContent = ''; return }
+    const laneIx = new Map(graph.lanes.map((l, i) => [l.id, i]))
+    const color = (id) => COLORS[(laneIx.get(id) ?? 0) % COLORS.length]
+    const x = (id) => PAD + (laneIx.get(id) ?? 0) * LANE
+    const cy = (i) => i * ROW + ROW / 2
+    const revs = graph.revisions
+    const rowOf = (lane, rev) => revs.findIndex((r) => r.lane === lane && r.revision <= rev)
+    const width = PAD * 2 + Math.max(0, graph.lanes.length - 1) * LANE
+    const height = revs.length * ROW
+
+    const cur = graph.lanes.find((l) => l.current)
+    $('where').textContent = cur ? '· on ' + cur.name : ''
+    lg.innerHTML = graph.lanes.map((l) => `<span class="${l.current ? 'cur' : ''}"><i style="background:${color(l.id)}"></i>${esc(l.name)}${l.current ? ' (here)' : ''}</span>`).join('')
+
+    let paths = ''
+    for (const l of graph.lanes) {
+      const rows = revs.map((r, i) => (r.lane === l.id ? i : -1)).filter((i) => i >= 0)
+      if (!rows.length) continue
+      const top = cy(rows[0]), lx = x(l.id), c = color(l.id)
+      let bottom = cy(rows[rows.length - 1])
+      if (l.from && laneIx.has(l.from.lane)) {
+        const pr = rowOf(l.from.lane, l.from.revision)
+        const py = pr >= 0 ? cy(pr) : height
+        const px = x(l.from.lane)
+        paths += `<path d="M${lx} ${top} L${lx} ${bottom} C${lx} ${bottom + ROW * 0.6} ${px} ${py - ROW * 0.6} ${px} ${py}" stroke="${c}" />`
+      } else {
+        if (l.kind === 'trunk') bottom = height
+        paths += `<path d="M${lx} ${top} L${lx} ${bottom}" stroke="${c}" />`
+      }
+    }
+    for (const m of graph.merges) {
+      const fr = revs.findIndex((r) => r.lane === m.fromLane && r.revision === m.fromRevision)
+      const tr = revs.findIndex((r) => r.lane === m.toLane && r.revision === m.toRevision)
+      if (fr < 0 || tr < 0) continue
+      const fx = x(m.fromLane), tx = x(m.toLane), fy = cy(fr), ty = cy(tr)
+      paths += `<path d="M${fx} ${fy} C${fx} ${fy - ROW * 0.8} ${tx} ${ty + ROW * 0.8} ${tx} ${ty}" stroke="${color(m.fromLane)}" stroke-dasharray="4 3" />`
+    }
+    const merged = new Set(graph.merges.map((m) => m.toLane + '@' + m.toRevision))
+    const branchedAt = new Map()
+    for (const l of graph.lanes) if (l.from) {
+      const pr = rowOf(l.from.lane, l.from.revision)
+      if (pr >= 0) branchedAt.set(pr, [...(branchedAt.get(pr) || []), l])
+    }
+    const tagsAt = new Map()
+    for (const t of graph.tags) {
+      const pr = rowOf(t.lane, t.revision)
+      if (pr >= 0) tagsAt.set(pr, [...(tagsAt.get(pr) || []), t])
+    }
+    let dots = ''
+    revs.forEach((r, i) => {
+      const lane = graph.lanes[laneIx.get(r.lane)]
+      const c = color(r.lane)
+      dots += lane && lane.current && i === revs.findIndex((q) => q.lane === r.lane)
+        ? `<circle cx="${x(r.lane)}" cy="${cy(i)}" r="5.5" fill="var(--orca-background,#fff)" stroke="${c}" stroke-width="2.5" />`
+        : `<circle cx="${x(r.lane)}" cy="${cy(i)}" r="4.5" fill="${c}" />`
+    })
+
+    const rowsHtml = revs.map((r, i) => {
+      const chips = []
+      if (merged.has(r.lane + '@' + r.revision)) chips.push(`<span class="chip" style="color:${color(r.lane)}">merge</span>`)
+      for (const l of branchedAt.get(i) || []) chips.push(`<span class="chip" style="color:${color(l.id)}">⑂ ${esc(l.name)}</span>`)
+      for (const t of tagsAt.get(i) || []) chips.push(`<span class="chip muted">🏷 ${esc(t.name)}</span>`)
+      const sel = selected && selected.lane === r.lane && selected.revision === r.revision
+      const first = (r.message || '').split(/\r?\n/)[0] || '(no message)'
+      return `<div class="row${sel ? ' sel' : ''}" data-i="${i}" title="${esc(r.message)}">
+        <div class="txt"><div class="msg"><span class="rev">r${r.revision}</span>${esc(first)}${chips.join('')}</div>
+        <div class="muted xs">${esc(r.author)} · ${esc(ago(r.date))}</div></div></div>`
+    }).join('')
+
+    g.innerHTML = `<svg width="${width}" height="${height}"><g fill="none" stroke-width="2">${paths}</g>${dots}</svg>
+      <div style="padding-left:${width + 2}px">${rowsHtml}</div>`
+    g.querySelectorAll('.row').forEach((el) => el.addEventListener('click', () => {
+      const r = revs[Number(el.dataset.i)]
+      selected = { lane: r.lane, revision: r.revision }
+      g.querySelectorAll('.row.sel').forEach((s) => s.classList.remove('sel'))
+      el.classList.add('sel')
+      showDetail()
+    }))
+  }
+
+  async function showDetail() {
+    const d = $('detail')
+    if (!selected || !graph) { d.innerHTML = ''; return }
+    const want = selected
+    const lane = graph.lanes.find((l) => l.id === want.lane)
+    d.innerHTML = `<div class="muted xs">Loading r${want.revision}…</div>`
+    let info
+    try {
+      info = await orca.plugin.request('svn.revision', want)
+    } catch (e) {
+      if (selected === want) d.innerHTML = `<div class="notice err">${esc(errText(e))}</div>`
+      return
+    }
+    if (selected !== want) return
+    const files = info.paths.slice(0, 200).map((p) =>
+      `<div class="f" title="${esc(p.path)}"><span class="${esc(p.action)}">${esc(p.action)}</span> ${esc(p.path)}${p.copyFrom ? ` <span class="muted">← ${esc(p.copyFrom)}</span>` : ''}</div>`).join('')
+    const more = info.paths.length > 200 ? `<div class="muted xs">…and ${info.paths.length - 200} more</div>` : ''
+    d.innerHTML = `<div><b>r${info.revision}</b> <span class="muted xs">· ${esc(lane ? lane.name : '')} · ${esc(info.author)} · ${esc(ago(info.date))}</span></div>
+      <div class="xs" style="margin:4px 0 6px;white-space:pre-wrap">${esc(info.message)}</div>
+      ${files}${more}
+      <div class="actions">
+        <button data-act="diff">Diff revision</button>
+        ${lane && lane.current ? `<button data-act="update">Update to r${info.revision}</button>` : ''}
+        ${lane && !lane.current ? `<button data-act="switch">Switch to ${esc(lane.name)}…</button>` : ''}
+      </div>`
+    d.querySelectorAll('button[data-act]').forEach((b) => b.addEventListener('click', () => act(b.dataset.act, want, lane, b)))
+  }
+
+  async function act(kind, sel, lane, btn) {
+    // Switch and update change the working copy: the first click asks, the second runs.
+    if ((kind === 'switch' || kind === 'update') && !btn.dataset.armed) {
+      btn.dataset.armed = '1'
+      btn.dataset.label = btn.textContent
+      btn.textContent = kind === 'switch' ? `Confirm switch to ${lane.name}` : `Confirm update to r${sel.revision}`
+      setTimeout(() => { if (btn.isConnected && btn.dataset.armed) { delete btn.dataset.armed; btn.textContent = btn.dataset.label } }, 4000)
+      return
+    }
+    btn.disabled = true
+    try {
+      if (kind === 'diff') await orca.plugin.request('svn.diffRevision', sel)
+      if (kind === 'update') notice((await orca.plugin.request('svn.updateTo', sel)).message)
+      if (kind === 'switch') { notice((await orca.plugin.request('svn.switch', { lane: sel.lane })).message); await load() }
+    } catch (e) {
+      notice(errText(e), true)
+    } finally {
+      btn.disabled = false
+    }
+  }
+
+  $('refresh').addEventListener('click', load)
+  // Reload when the focused workspace changes (not on every file edit: history needs the server).
+  const onState = (s) => {
+    if (s.workspace === workspace && graph) return
+    workspace = s.workspace
+    selected = null
+    if (s.status === 'ok') load()
+    else { graph = null; render(); $('detail').innerHTML = ''; notice(s.status === 'no-workspace' ? 'Focus a workspace to see its history.' : 'This workspace is not an SVN working copy.') }
+  }
+  orca.on('svn.changed', onState)
+  orca.plugin.request('svn.state').then(onState, (e) => notice(errText(e), true))
+})()
+</script>
+</body>
+</html>

@@ -19,6 +19,13 @@
         "icon": "database",
         "entry": "src/panel.tsx",
         "ui": "components"
+      },
+      {
+        "id": "svn-history",
+        "title": "SVN History",
+        "icon": "branch",
+        "entry": "src/history.html",
+        "ui": "html"
       }
     ],
     "commands": [
