@@ -2,9 +2,31 @@
   "manifestVersion": 2,
   "id": "svn",
   "name": "SVN",
-  "version": "0.2.0",
+  "version": "0.2.1",
   "license": "Apache-2.0",
   "description": "Subversion in Orca: see a working copy's changes, then update, commit, revert, add, resolve and diff from a sidebar panel.",
+  "icon": "assets/icon.png",
+  "cover": {
+    "path": "assets/cover.png",
+    "alt": "SVN for Orca: the SVN changes panel, the SVN History revision tree and the SVN Diff viewer side by side."
+  },
+  "screenshots": [
+    {
+      "path": "assets/screenshot-changes.png",
+      "alt": "SVN panel showing a conflicted file, modified, added and deleted files with checkboxes, a commit message and a warning that the server has newer revisions.",
+      "caption": "Changes, conflicts and commit in the sidebar"
+    },
+    {
+      "path": "assets/screenshot-history.png",
+      "alt": "SVN History panel drawing trunk and three branches as coloured lanes with branch points, a merge, tags, and details for revision r4184.",
+      "caption": "Revision tree with branches, merges and tags"
+    },
+    {
+      "path": "assets/screenshot-diff.png",
+      "alt": "SVN Diff editor tab showing three changed files as cards with old and new line numbers and green and red changed lines.",
+      "caption": "Diffs open in a full editor tab"
+    }
+  ],
   "engines": {
     "orca": ">=1.4.259"
   },
