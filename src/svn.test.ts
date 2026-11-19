@@ -118,3 +118,28 @@ test('real repo: status, commit, update, conflict, resolve, revert', { skip: !ha
 
   await assert.rejects(svn.info(run, join(wc, '..')), (e: svn.SvnError) => e.kind === 'not-wc')
 })
+
+function hasGit(): boolean {
+  try {
+    execFileSync('git', ['--version'], { stdio: 'ignore' })
+    return true
+  } catch {
+    return false
+  }
+}
+
+test('real repo: .gitignore flags files and blocks adding them, with or without a git repo', { skip: !hasSvn() || !hasGit() }, async () => {
+  for (const withGit of [true, false]) {
+    const { wc } = tempRepo()
+    if (withGit) execFileSync('git', ['init', '-q'], { cwd: wc })
+    writeFileSync(join(wc, '.gitignore'), '*.env\nvendor/\n')
+    writeFileSync(join(wc, 'secret.env'), 'x')
+    writeFileSync(join(wc, 'keep.txt'), 'x')
+    const files = await svn.status(svn.defaultRunner, wc)
+    const flag = (p: string) => files.find((f) => f.path === p)?.ignored ?? false
+    assert.equal(flag('keep.txt'), false)
+    assert.equal(flag('secret.env'), true)
+    await assert.rejects(svn.add(svn.defaultRunner, wc, ['secret.env']), /ignored by \.gitignore/)
+    await assert.rejects(svn.commit(svn.defaultRunner, wc, ['secret.env'], 'm', ['secret.env']), /ignored by \.gitignore/)
+  }
+})

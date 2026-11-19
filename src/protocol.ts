@@ -3,7 +3,8 @@ export {}
 
 export type FileStatus = 'conflicted' | 'modified' | 'added' | 'deleted' | 'missing' | 'unversioned'
 
-export type SvnFile = { path: string; status: FileStatus }
+/** `ignored`: matched by .gitignore; listed apart and left out of Select all. */
+export type SvnFile = { path: string; status: FileStatus; ignored?: boolean }
 
 export type SvnInfo = {
   url: string

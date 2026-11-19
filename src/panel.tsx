@@ -167,7 +167,7 @@ function FileRow(props: { file: SvnFile }) {
           {f.status === 'modified' || f.status === 'added' || f.status === 'conflicted' ? (
             <IconButton icon="file-text" label={`Diff ${f.path}`} size="sm" variant="ghost" disabled={disabled} onPress={() => diff(f.path)} />
           ) : null}
-          {f.status === 'unversioned' ? (
+          {f.status === 'unversioned' && !f.ignored ? (
             <IconButton icon="add" label={`Add ${f.path}`} size="sm" variant="ghost" disabled={disabled} onPress={() => add([f.path])} />
           ) : null}
           {f.status === 'conflicted' ? (
@@ -281,6 +281,20 @@ function Changes(props: { files: SvnFile[] }) {
   )
 }
 
+function GitIgnored(props: { files: SvnFile[] }) {
+  if (!props.files.length) return null
+  return (
+    <Collapsible title={`Git ignored · ${props.files.length}`} defaultOpen={false}>
+      <Stack gap="xs">
+        <Text muted size="xs">
+          Matched by .gitignore. Not included in Select all; tick a file to commit it on purpose.
+        </Text>
+        <FileList files={props.files} />
+      </Stack>
+    </Collapsible>
+  )
+}
+
 function Unversioned(props: { files: SvnFile[] }) {
   if (!props.files.length) return null
   const b = read(busy)
@@ -317,7 +331,7 @@ export default function Panel() {
   if (s.status === 'svn-missing') return wrap(<EmptyState title="svn not found" description={s.error} />)
   if (s.status === 'error') return wrap(<Callout tone="danger">Could not read SVN status: {s.error}</Callout>)
 
-  const of = (st: FileStatus[]) => s.files.filter((f) => st.includes(f.status))
+  const of = (st: FileStatus[]) => s.files.filter((f) => !f.ignored && st.includes(f.status))
   return (
     <Stack gap="sm">
       <Header s={s} />
@@ -336,9 +350,10 @@ export default function Panel() {
       ) : null}
       {noticeBox}
       {s.files.length ? <CommitBox files={s.files} /> : <Text muted>No local changes.</Text>}
-      <Conflicts files={of(['conflicted'])} />
+      <Conflicts files={s.files.filter((f) => f.status === 'conflicted')} />
       <Changes files={of(CHANGES)} />
       <Unversioned files={of(['unversioned'])} />
+      <GitIgnored files={s.files.filter((f) => f.ignored && f.status !== 'conflicted')} />
     </Stack>
   )
 }

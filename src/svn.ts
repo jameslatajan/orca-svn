@@ -40,6 +40,48 @@ export const defaultRunner: SvnRunner = (args, cwd, timeoutMs) =>
     )
   })
 
+/** Returns the subset of `paths` (relative to `cwd`) that git ignores. Empty when git is missing,
+ *  `cwd` is not inside a git repo, or nothing matches; never throws. */
+export type IgnoreCheck = (cwd: string, paths: readonly string[]) => Promise<Set<string>>
+
+function checkIgnore(gitArgs: string[], cwd: string, input: string): Promise<{ out: string; code: number }> {
+  return new Promise((done) => {
+    const child = execFile(
+      'git',
+      [...gitArgs, 'check-ignore', '--no-index', '-z', '--stdin'],
+      { cwd, timeout: 15_000, maxBuffer: 16 * 1024 * 1024, windowsHide: true, encoding: 'utf8' },
+      (err, stdout) => {
+        const c = err ? (err as { code?: unknown }).code : 0
+        done({ out: String(stdout ?? ''), code: typeof c === 'number' ? c : -1 })
+      }
+    )
+    child.stdin?.on('error', () => {})
+    child.stdin?.end(input)
+  })
+}
+
+/** Uses the enclosing git repo when there is one; otherwise a throwaway git dir with `cwd` as the
+ *  work tree, so a .gitignore in a plain SVN checkout still counts. */
+export const gitIgnored: IgnoreCheck = async (cwd, paths) => {
+  if (!paths.length) return new Set()
+  const input = paths.join('\0') + '\0'
+  let r = await checkIgnore([], cwd, input)
+  if (r.code !== 0 && r.code !== 1) {
+    const dir = mkdtempSync(join(tmpdir(), 'orca-svn-git-'))
+    try {
+      const init = await new Promise<boolean>((ok) =>
+        execFile('git', ['init', '-q', '--bare', dir], { windowsHide: true, timeout: 15_000 }, (e) => ok(!e))
+      )
+      if (!init) return new Set()
+      r = await checkIgnore([`--git-dir=${dir}`, `--work-tree=${cwd}`], cwd, input)
+    } finally {
+      rmSync(dir, { recursive: true, force: true })
+    }
+  }
+  if (r.code !== 0) return new Set()
+  return new Set(r.out.split('\0').filter(Boolean).map((p) => p.replace(/\\/g, '/')))
+}
+
 /** Maps svn's stderr to a friendly error. */
 export function mapError(stderr: string): SvnError {
   const first = stderr.split(/\r?\n/).find((l) => l.trim()) ?? 'svn failed'
@@ -168,8 +210,22 @@ export async function info(run: SvnRunner, cwd: string): Promise<SvnInfo> {
   return parseInfo(await svn(run, ['info', '--xml', '.'], cwd))
 }
 
-export async function status(run: SvnRunner, cwd: string, timeoutMs = DEFAULT_TIMEOUT_MS): Promise<SvnFile[]> {
-  return parseStatus(await svn(run, ['status', '--xml', '.'], cwd, timeoutMs), cwd)
+/** Changed files; those .gitignore matches are flagged `ignored`. */
+export async function status(
+  run: SvnRunner,
+  cwd: string,
+  timeoutMs = DEFAULT_TIMEOUT_MS,
+  ignored: IgnoreCheck = gitIgnored
+): Promise<SvnFile[]> {
+  const files = parseStatus(await svn(run, ['status', '--xml', '.'], cwd, timeoutMs), cwd)
+  const hit = await ignored(cwd, files.map((f) => f.path))
+  return hit.size ? files.map((f) => (hit.has(f.path) ? { ...f, ignored: true } : f)) : files
+}
+
+/** Refuses to add files that .gitignore matches. */
+async function refuseIgnored(cwd: string, files: readonly string[], ignored: IgnoreCheck): Promise<void> {
+  const hit = await ignored(cwd, files.map((f) => f.replace(/\\/g, '/')))
+  if (hit.size) throw new SvnError(`Refusing to add files ignored by .gitignore: ${[...hit].join(', ')}`, 'other')
 }
 
 export async function update(run: SvnRunner, cwd: string): Promise<{ revision: number | null; conflicts: string[] }> {
@@ -177,7 +233,10 @@ export async function update(run: SvnRunner, cwd: string): Promise<{ revision: n
   return { revision: parseRevision(out), conflicts: parseUpdateConflicts(out) }
 }
 
-export async function add(run: SvnRunner, cwd: string, files: readonly string[]): Promise<void> {
+export async function add(run: SvnRunner, cwd: string, files: readonly string[], ignored: IgnoreCheck = gitIgnored): Promise<void> {
+  const abs = safeFiles(cwd, files)
+  await refuseIgnored(cwd, files, ignored)
+  void abs
   await svn(run, ['add', '--parents', '--', ...safeFiles(cwd, files)], cwd)
 }
 
@@ -195,11 +254,12 @@ export async function commit(
   cwd: string,
   files: readonly string[],
   message: string,
-  toAdd: readonly string[] = []
+  toAdd: readonly string[] = [],
+  ignored: IgnoreCheck = gitIgnored
 ): Promise<number | null> {
   if (!message.trim()) throw new SvnError('Enter a commit message.', 'other')
   const paths = safeFiles(cwd, files)
-  if (toAdd.length) await add(run, cwd, toAdd)
+  if (toAdd.length) await add(run, cwd, toAdd, ignored)
   const dir = mkdtempSync(join(tmpdir(), 'orca-svn-'))
   const msgFile = join(dir, 'message.txt')
   try {
