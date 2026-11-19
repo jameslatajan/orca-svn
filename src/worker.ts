@@ -1,6 +1,7 @@
 // The plugin's worker: reads SVN state for the focused workspace and runs svn actions.
 import type { OrcaWorkerApi } from 'orca/worker'
 import type { ActionResult, SvnState } from './protocol'
+import { isAbsolute, relative } from 'node:path'
 import * as svn from './svn'
 import { loadHistory, type LaneUrls } from './history'
 import { watchFolder, type FolderWatch } from './watch'
@@ -256,10 +257,36 @@ export default function activate(orca: OrcaWorkerApi): void {
       }
     })
   })
-  orca.panels.handle('svn.diffRevision', async ({ lane, revision }) => {
+  orca.panels.handle('svn.openDiff', async ({ lane, revision }) => {
     const ws = await local()
     const rev = checkRev(revision)
-    return svnInvalid(() => svn.diffRevision(options.runner, ws.path, laneUrl(lane), rev))
+    const url = laneUrl(lane)
+    return svnInvalid(async () => {
+      const [{ text, truncated }, info] = await Promise.all([
+        svn.diffRevision(options.runner, ws.path, url, rev, 20_000_000),
+        svn.info(options.runner, ws.path)
+      ])
+      const header = `# r${rev} on ${lane.replace(/^b:/, '')}  (${url})\n` + (truncated ? '# Cut off at 20 MB.\n' : '') + '\n'
+      const name = `r${rev}-${lane.replace(/^b:/, '').replace(/[^\w.-]+/g, '_')}.svndiff`
+      const file = svn.saveDiff(svn.diffDir(ws.path, info.root), name, header + (text || '# No content changes (properties or copies only).\n'))
+      const rel = relative(ws.path, file).replace(/\\/g, '/')
+      const inside = !(rel.startsWith('..') || isAbsolute(rel))
+      orca.log(`openDiff: wrote ${file} (${text.length} bytes); opening in workspace ${ws.workspaceId}`)
+      // Try the workspace-relative path first, then the absolute one.
+      const tries = inside ? [rel, file] : [file]
+      let last: unknown
+      for (const path of tries) {
+        try {
+          await orca.host.call('editor.open', { workspaceId: ws.workspaceId, path })
+          orca.log(`openDiff: opened ${path}`)
+          return { path }
+        } catch (err) {
+          last = err
+          orca.log(`openDiff: editor.open(${path}) failed: ${errText(err)}`)
+        }
+      }
+      throw invalid(`Orca could not open ${rel}: ${errText(last)}`)
+    })
   })
   orca.panels.handle('svn.switch', async ({ lane }) => {
     const url = laneUrl(lane)

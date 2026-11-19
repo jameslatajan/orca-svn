@@ -75,8 +75,8 @@ declare module 'orca' {
     'svn.history': { output: HistoryGraph }
     /** Changed paths of one revision on a lane from the last `svn.history`. */
     'svn.revision': { input: { lane: string; revision: number }; output: RevisionDetail }
-    /** `svn diff -c REV` of a lane, as text for the panel. */
-    'svn.diffRevision': { input: { lane: string; revision: number }; output: { text: string; truncated: boolean } }
+    /** Saves `svn diff -c REV` under .svn/orca-diffs and opens it in an editor tab. */
+    'svn.openDiff': { input: { lane: string; revision: number }; output: { path: string } }
     /** `svn switch` the working copy to a lane. */
     'svn.switch': { input: { lane: string }; output: ActionResult }
   }

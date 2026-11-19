@@ -1,6 +1,6 @@
 // Runs the svn CLI (no shell, always --non-interactive) and parses its XML output.
 import { execFile } from 'node:child_process'
-import { mkdtempSync, rmSync, writeFileSync } from 'node:fs'
+import { mkdirSync, mkdtempSync, readdirSync, rmSync, statSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { isAbsolute, join, relative, resolve } from 'node:path'
 import type { FileStatus, SvnInfo, SvnFile } from './protocol'
@@ -124,7 +124,9 @@ export function parseStatus(xml: string, base: string): SvnFile[] {
     if (!status && props === 'modified') status = 'modified'
     if (!status) continue
     const rel = isAbsolute(path) ? relative(base, path) : path
-    files.push({ path: rel.replace(/\\/g, '/'), status })
+    const p = rel.replace(/\\/g, '/')
+    if (p === LOCAL_DIFF_DIR || p.startsWith(LOCAL_DIFF_DIR + '/')) continue // the plugin's own diff files
+    files.push({ path: p, status })
   }
   return files
 }
@@ -294,11 +296,38 @@ export async function headRevision(run: SvnRunner, cwd: string, url: string): Pr
 export const MAX_DIFF_BYTES = 400_000
 
 /** `svn diff -c REV url`, cut at MAX_DIFF_BYTES. Runs without a shell, so any URL is safe. */
-export async function diffRevision(run: SvnRunner, cwd: string, url: string, revision: number): Promise<{ text: string; truncated: boolean }> {
+export async function diffRevision(run: SvnRunner, cwd: string, url: string, revision: number, maxBytes = MAX_DIFF_BYTES): Promise<{ text: string; truncated: boolean }> {
   const out = await svn(run, ['diff', '-c', String(revision), url], cwd, LONG_TIMEOUT_MS)
-  return out.length > MAX_DIFF_BYTES ? { text: out.slice(0, MAX_DIFF_BYTES), truncated: true } : { text: out, truncated: false }
+  return out.length > maxBytes ? { text: out.slice(0, maxBytes), truncated: true } : { text: out, truncated: false }
 }
 
 export async function switchTo(run: SvnRunner, cwd: string, url: string): Promise<number | null> {
   return parseRevision(await svn(run, ['switch', url, '.'], cwd, LONG_TIMEOUT_MS))
+}
+
+/** Folder for diffs opened in editor tabs: inside .svn, so svn and the watcher ignore it. */
+export const DIFF_DIR = join('.svn', 'orca-diffs')
+/** Used when the workspace is a subfolder of the working copy (its .svn is outside the workspace). */
+export const LOCAL_DIFF_DIR = '.orca-svn-diffs'
+export const KEEP_DIFFS = 20
+
+/** Where diffs go: <workspace>/.svn/orca-diffs when the workspace is the working-copy root,
+ *  otherwise <workspace>/.orca-svn-diffs (Orca only opens files inside the workspace). */
+export function diffDir(workspace: string, wcRoot: string): string {
+  return resolve(workspace) === resolve(wcRoot || workspace) ? join(workspace, DIFF_DIR) : join(workspace, LOCAL_DIFF_DIR)
+}
+
+/** Writes `text` to <dir>/<name>, keeps the newest KEEP_DIFFS, returns the path. */
+export function saveDiff(dir: string, name: string, text: string): string {
+  if (!/^[\w.-]+\.svndiff$/.test(name) || name.startsWith('.')) throw new SvnError(`Bad diff file name: ${name}`, 'other')
+  mkdirSync(dir, { recursive: true })
+  const file = join(dir, name)
+  writeFileSync(file, text, 'utf8')
+  const old = readdirSync(dir)
+    .filter((f) => f.endsWith('.diff') || f.endsWith('.svndiff'))
+    .map((f) => ({ f, t: statSync(join(dir, f)).mtimeMs }))
+    .sort((x, y) => y.t - x.t)
+    .slice(KEEP_DIFFS)
+  for (const o of old) rmSync(join(dir, o.f), { force: true })
+  return file
 }

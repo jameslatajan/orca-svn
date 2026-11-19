@@ -39,13 +39,6 @@
   html, body { overflow-x: hidden; max-width: 100%; }
   #detail, #notice, .notice { overflow-wrap: anywhere; min-width: 0; }
   #detail > * { max-width: 100%; }
-  pre.diff { margin: 8px 0 0; padding: 6px 0; font: 11px/1.45 var(--orca-font-mono, ui-monospace, monospace); background: var(--orca-muted, #f5f5f5); border-radius: 6px; overflow: auto; max-height: 50vh; white-space: pre; }
-  pre.diff span { display: block; padding: 0 8px; min-width: max-content; }
-  .dadd { background: rgba(22, 163, 74, .16); }
-  .ddel { background: rgba(220, 38, 38, .16); }
-  .dhunk { color: var(--orca-muted-foreground, #737373); }
-  .dh { font-weight: 600; }
-  .dm { color: var(--orca-muted-foreground, #737373); }
   .dhead { display: flex; justify-content: space-between; align-items: flex-start; gap: 8px; }
   .dhead button { margin: -4px -6px 0 0; }
   .f { font: 11px var(--orca-font-mono, ui-monospace, monospace); padding: 1px 0; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
@@ -256,19 +249,17 @@
       <div class="xs" style="margin:4px 0 6px;white-space:pre-wrap">${esc(info.message)}</div>
       ${files}${more}
       <div class="actions">
-        <button data-act="diff">Show diff</button>
+        <button data-act="diff" title="Open the diff in an editor tab">Open diff ↗</button>
         <button data-act="copy">Copy r${info.revision}</button>
         ${lane && !lane.current ? `<button data-act="switch">Switch to ${esc(lane.name)}…</button>` : ''}
       </div>
-      <div id="diff"></div>`
+      <div id="act-err" class="xs" style="color:var(--orca-destructive,#dc2626);margin-top:6px"></div>`
     d.querySelector('[data-close]').addEventListener('click', closeDetail)
     d.querySelectorAll('button[data-act]').forEach((b) => b.addEventListener('click', () => act(b.dataset.act, want, lane, b)))
   }
 
   async function act(kind, sel, lane, btn) {
     if (kind === 'copy') return copyText(`r${sel.revision}`, btn)
-    const box = $('diff')
-    if (kind === 'diff' && box.childElementCount) { box.innerHTML = ''; btn.textContent = 'Show diff'; return }
     // Switch changes the working copy: the first click asks, the second runs.
     if (kind === 'switch' && !btn.dataset.armed) {
       btn.dataset.armed = '1'
@@ -280,11 +271,18 @@
     btn.disabled = true
     try {
       if (kind === 'diff') {
-        box.innerHTML = '<div class="muted xs" style="margin-top:8px">Loading diff…</div>'
-        const r = await orca.plugin.request('svn.diffRevision', sel)
-        if (selected !== sel && !(selected && selected.lane === sel.lane && selected.revision === sel.revision)) return
-        box.innerHTML = renderDiff(r.text) + (r.truncated ? '<div class="muted xs">Diff is cut off: too large to show in full.</div>' : '')
-        btn.textContent = 'Hide diff'
+        const was = btn.textContent
+        btn.textContent = 'Opening…'
+        try {
+          await orca.plugin.request('svn.openDiff', sel)
+          btn.textContent = 'Opened ✓'
+          setTimeout(() => { if (btn.isConnected) btn.textContent = was }, 1500)
+        } catch (e) {
+          btn.textContent = was
+          const box = document.getElementById('act-err')
+          if (box) box.textContent = 'Could not open the diff: ' + errText(e)
+          throw e
+        }
       }
       if (kind === 'switch') { notice((await orca.plugin.request('svn.switch', { lane: sel.lane })).message); await load() }
     } catch (e) {
@@ -292,17 +290,6 @@
     } finally {
       btn.disabled = false
     }
-  }
-
-  function renderDiff(text) {
-    if (!text.trim()) return '<div class="muted xs" style="margin-top:8px">No content changes (properties or copies only).</div>'
-    const lines = text.split(/\r?\n/).map((l) => {
-      const cls = l.startsWith('Index: ') || l.startsWith('====') ? 'dh'
-        : l.startsWith('+++') || l.startsWith('---') ? 'dm'
-        : l.startsWith('@@') ? 'dhunk' : l.startsWith('+') ? 'dadd' : l.startsWith('-') ? 'ddel' : ''
-      return `<span class="${cls}">${esc(l) || ' '}</span>`
-    })
-    return `<pre class="diff">${lines.join('\n')}</pre>`
   }
 
   async function copyText(text, btn) {

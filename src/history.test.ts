@@ -5,7 +5,8 @@ import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { pathToFileURL } from 'node:url'
 import { copyOrigin, loadHistory, parseLayout, parseMergeinfo } from './history'
-import { defaultRunner, diffRevision, headRevision, parseLog } from './svn'
+import { defaultRunner, diffRevision, headRevision, diffDir, KEEP_DIFFS, parseLog, parseStatus, saveDiff } from './svn'
+import { readdirSync } from 'node:fs'
 import { hasSvn } from './testRepo'
 
 test('parseLayout finds trunk/branches/tags around a project folder', () => {
@@ -69,4 +70,23 @@ test('real repo: trunk, a branch, a tag and a merge', { skip: !hasSvn() }, async
   const d = await diffRevision(defaultRunner, wc, `${url}/branches/feat/app`, 5)
   assert.ok(d.text.includes('+b') && !d.truncated, d.text)
   assert.equal(await headRevision(defaultRunner, wc, `${url}/trunk/app`), 6)
+
+  // Saved diffs live under .svn (svn ignores them), and only the newest KEEP_DIFFS stay.
+  // Workspace = working-copy root: diffs go under .svn.
+  const dir = diffDir(wc, wc)
+  const file = saveDiff(dir, 'r5-feat.svndiff', d.text)
+  assert.ok(file.includes(join('.svn', 'orca-diffs')))
+  assert.ok(!execFileSync('svn', ['status'], { cwd: wc }).toString().includes('orca-diffs'))
+  for (let i = 0; i < KEEP_DIFFS + 3; i++) saveDiff(dir, `r${100 + i}.svndiff`, 'x')
+  assert.equal(readdirSync(join(wc, '.svn', 'orca-diffs')).length, KEEP_DIFFS)
+  assert.throws(() => saveDiff(dir, '../evil.svndiff', 'x'))
+
+  // Workspace = a subfolder of the working copy: diffs go in <workspace>/.orca-svn-diffs, hidden from status.
+  const sub = join(wc, 'sub')
+  execFileSync('svn', ['-q', 'mkdir', sub])
+  const local = diffDir(sub, wc)
+  assert.equal(local, join(sub, '.orca-svn-diffs'))
+  saveDiff(local, 'r5.svndiff', 'x')
+  assert.ok(execFileSync('svn', ['status', '--xml'], { cwd: wc }).toString().includes('orca-svn-diffs'))
+  assert.ok(!parseStatus(execFileSync('svn', ['status', '--xml', '.'], { cwd: sub }).toString(), sub).some((f) => f.path.includes('orca-svn-diffs')))
 })
