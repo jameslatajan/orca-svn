@@ -30,7 +30,7 @@ test('groups files and commits only ticked ones', async () => {
   assert.ok(view.find({ text: 'r5' }))
   // Commit disabled until a file is ticked and a message entered.
   assert.ok(view.find({ text: 'Tick the files to commit.' }))
-  await view.toggle({ label: 'M' })
+  await view.toggle({ label: ' ' })
   assert.ok(view.find({ text: 'Write a commit message.' }))
   await view.type({ label: 'Commit message' }, 'Fix typo')
   await view.press({ text: 'Commit 1 file' })

@@ -25,7 +25,12 @@
   .legend span { display: inline-flex; align-items: center; gap: 4px; white-space: nowrap; }
   .legend i { width: 8px; height: 8px; border-radius: 50%; display: inline-block; }
   .legend .cur { font-weight: 600; }
-  #graph { position: relative; border-top: 1px solid var(--orca-border, #e5e5e5); }
+  /* App shell: header and legend stay put, only the graph scrolls, details dock at the bottom. */
+  html, body { height: 100%; }
+  body { display: flex; flex-direction: column; overflow: hidden; }
+  header, #loader, #notice, #legend, #detail { flex: none; }
+  #scroll { flex: 1; min-height: 0; overflow-y: auto; overflow-x: hidden; border-top: 1px solid var(--orca-border, #e5e5e5); }
+  #graph { position: relative; }
   svg { position: absolute; left: 0; top: 0; pointer-events: none; }
   .row { display: flex; align-items: center; height: 40px; padding-right: 10px; cursor: pointer; }
   .row:hover { background: var(--orca-muted, #f5f5f5); }
@@ -34,7 +39,7 @@
   .msg { white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
   .rev { font: 600 11px var(--orca-font-mono, ui-monospace, monospace); margin-right: 4px; }
   .chip { font-size: 10px; padding: 0 5px; border-radius: 4px; border: 1px solid currentColor; margin-left: 4px; white-space: nowrap; }
-  #detail { position: sticky; bottom: 0; border-top: 1px solid var(--orca-border, #e5e5e5); background: var(--orca-card, #fff); padding: 10px 12px; max-height: 45%; overflow: auto; }
+  #detail { border-top: 1px solid var(--orca-border, #e5e5e5); background: var(--orca-card, #fff); padding: 10px 12px; max-height: 50%; overflow: auto; box-shadow: 0 -4px 12px rgba(0,0,0,.18); }
   #detail:empty { display: none; }
   html, body { overflow-x: hidden; max-width: 100%; }
   #detail, #notice, .notice { overflow-wrap: anywhere; min-width: 0; }
@@ -78,7 +83,7 @@
 </div>
 <div id="notice"></div>
 <div id="legend" class="legend"></div>
-<div id="graph"></div>
+<div id="scroll"><div id="graph"></div></div>
 <div id="detail"></div>
 
 <script>
@@ -223,7 +228,8 @@
       selected = { lane: r.lane, revision: r.revision }
       g.querySelectorAll('.row.sel').forEach((s) => s.classList.remove('sel'))
       el.classList.add('sel')
-      showDetail()
+      // Once the dock opens and the list shrinks, keep the clicked row visible above it.
+      showDetail().then(() => el.scrollIntoView({ block: 'nearest' }))
     }))
   }
 

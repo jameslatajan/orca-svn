@@ -146,13 +146,14 @@ function FileRow(props: { file: SvnFile }) {
       <Box direction="row" align="center" gap="xs" minWidth={0}>
         {/* The checkbox carries only the short status code; the long path is a
             truncating Text so rows never overflow sideways. */}
-        <Box width={36} shrink={false}>
+        <Box width={64} shrink={false}>
           {canTick ? (
-            <Checkbox label={st.code} checked={read(checked).includes(f.path)} disabled={disabled} onChange={(on) => toggle(f.path, on)} />
+            <Box direction="row" align="center" gap="xs">
+              <Checkbox label=" " checked={read(checked).includes(f.path)} disabled={disabled} onChange={(on) => toggle(f.path, on)} />
+              <Badge tone={st.tone}>{st.code}</Badge>
+            </Box>
           ) : (
-            <Text tone={st.tone} size="xs" weight="semibold">
-              {st.code}
-            </Text>
+            <Badge tone={st.tone}>{st.code}</Badge>
           )}
         </Box>
         <Box grow minWidth={0}>

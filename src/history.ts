@@ -156,11 +156,18 @@ export async function loadHistory(run: svn.SvnRunner, cwd: string, progress: Pro
     return v
   }
   progress({ step: `Reading trunk and ${picked.length} branches…`, done, total })
-  const laneResults = await Promise.all([
-    laneLog('trunk', 'trunk', 'trunk', `${layout.prefix}/trunk${layout.suffix}`).then(tick('trunk')),
-    ...picked.map((b) => laneLog(`b:${b.name}`, b.name, 'branch', branchPath(b.name)).then(tick(b.name)))
-  ])
-  const lanes = laneResults.filter((l): l is LaneInput => !!l)
+  const branchResults = await Promise.all(picked.map((b) => laneLog(`b:${b.name}`, b.name, 'branch', branchPath(b.name)).then(tick(b.name))))
+  // A project branch copied from a trunk subfolder (/trunk/hris → /branches/x): trunk is that
+  // subfolder, not all of /trunk, and only branches of the same project belong in the graph.
+  const trunkRoot = `${layout.prefix}/trunk`
+  const own = branchResults.find((l) => l?.path === current)
+  const origin = own ? copyOrigin(own.path, own.entries) : null
+  const project = !layout.suffix && origin && origin.path.startsWith(trunkRoot + '/') ? origin.path : null
+  const trunkLane = await laneLog('trunk', 'trunk', 'trunk', project ?? `${trunkRoot}${layout.suffix}`).then(tick('trunk'))
+  const branches = project
+    ? branchResults.filter((l) => l && (l.path === current || copyOrigin(l.path, l.entries)?.path === project))
+    : branchResults
+  const lanes = [trunkLane, ...branches].filter((l): l is LaneInput => !!l)
 
   const tags = (
     await Promise.all(

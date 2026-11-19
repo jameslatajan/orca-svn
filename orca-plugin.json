@@ -2,7 +2,7 @@
   "manifestVersion": 2,
   "id": "svn",
   "name": "SVN",
-  "version": "0.2.4",
+  "version": "0.2.5",
   "license": "Apache-2.0",
   "description": "Subversion in Orca: see a working copy's changes, then update, commit, revert, add, resolve and diff from a sidebar panel.",
   "icon": "assets/icon.png",
