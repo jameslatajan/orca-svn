@@ -13,6 +13,8 @@ Orca's built-in Source Control view stays git-only; SVN lives in this panel.
 
 ## Requirements
 
+- **Orca** 1.4.259 or newer (`engines.orca` in `orca-plugin.json`; developed and tested on Orca 1.4.263).
+- **Subversion** command-line client 1.15.x or compatible (developed and tested on svn 1.15.0).
 - The `svn` command-line client on PATH. With TortoiseSVN, re-run its installer and enable **command line client tools**.
 - A saved login: run `svn update` once in a terminal and let it store your credentials. The plugin always runs `svn --non-interactive` and never asks for or stores passwords.
 
