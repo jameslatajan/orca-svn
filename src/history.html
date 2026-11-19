@@ -36,6 +36,8 @@
   .chip { font-size: 10px; padding: 0 5px; border-radius: 4px; border: 1px solid currentColor; margin-left: 4px; white-space: nowrap; }
   #detail { position: sticky; bottom: 0; border-top: 1px solid var(--orca-border, #e5e5e5); background: var(--orca-card, #fff); padding: 10px 12px; max-height: 45%; overflow: auto; }
   #detail:empty { display: none; }
+  .dhead { display: flex; justify-content: space-between; align-items: flex-start; gap: 8px; }
+  .dhead button { margin: -4px -6px 0 0; }
   .f { font: 11px var(--orca-font-mono, ui-monospace, monospace); padding: 1px 0; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
   .A { color: #16a34a; } .M { color: #2563eb; } .D { color: #dc2626; } .R { color: #d97706; }
   .actions { display: flex; flex-wrap: wrap; gap: 6px; margin-top: 8px; }
@@ -214,6 +216,7 @@
       <div style="padding-left:${width + 2}px">${rowsHtml}</div>`
     g.querySelectorAll('.row').forEach((el) => el.addEventListener('click', () => {
       const r = revs[Number(el.dataset.i)]
+      if (selected && selected.lane === r.lane && selected.revision === r.revision) return closeDetail()
       selected = { lane: r.lane, revision: r.revision }
       g.querySelectorAll('.row.sel').forEach((s) => s.classList.remove('sel'))
       el.classList.add('sel')
@@ -238,7 +241,8 @@
     const files = info.paths.slice(0, 200).map((p) =>
       `<div class="f" title="${esc(p.path)}"><span class="${esc(p.action)}">${esc(p.action)}</span> ${esc(p.path)}${p.copyFrom ? ` <span class="muted">← ${esc(p.copyFrom)}</span>` : ''}</div>`).join('')
     const more = info.paths.length > 200 ? `<div class="muted xs">…and ${info.paths.length - 200} more</div>` : ''
-    d.innerHTML = `<div><b>r${info.revision}</b> <span class="muted xs">· ${esc(lane ? lane.name : '')} · ${esc(info.author)} · ${esc(ago(info.date))}</span></div>
+    d.innerHTML = `<div class="dhead"><div><b>r${info.revision}</b> <span class="muted xs">· ${esc(lane ? lane.name : '')} · ${esc(info.author)} · ${esc(ago(info.date))}</span></div>
+      <button class="icon" data-close title="Close (Esc)" aria-label="Close revision details">✕</button></div>
       <div class="xs" style="margin:4px 0 6px;white-space:pre-wrap">${esc(info.message)}</div>
       ${files}${more}
       <div class="actions">
@@ -246,6 +250,7 @@
         ${lane && lane.current ? `<button data-act="update">Update to r${info.revision}</button>` : ''}
         ${lane && !lane.current ? `<button data-act="switch">Switch to ${esc(lane.name)}…</button>` : ''}
       </div>`
+    d.querySelector('[data-close]').addEventListener('click', closeDetail)
     d.querySelectorAll('button[data-act]').forEach((b) => b.addEventListener('click', () => act(b.dataset.act, want, lane, b)))
   }
 
@@ -270,6 +275,12 @@
     }
   }
 
+  function closeDetail() {
+    selected = null
+    $('detail').innerHTML = ''
+    document.querySelectorAll('.row.sel').forEach((s) => s.classList.remove('sel'))
+  }
+  document.addEventListener('keydown', (e) => { if (e.key === 'Escape' && selected) closeDetail() })
   $('refresh').addEventListener('click', load)
   // Reload when the focused workspace changes (not on every file edit: history needs the server).
   const onState = (s) => {
