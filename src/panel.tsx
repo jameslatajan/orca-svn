@@ -63,7 +63,7 @@ export function splitPath(path: string): { name: string; dir: string } {
 
 /** Long lists scroll inside their section instead of pushing the panel. */
 const FileList = (props: { files: SvnFile[] }) => (
-  <Box direction="column" gap="xs" maxHeight={320} scroll="y">
+  <Box direction="column" gap="xs" maxHeight={360} minWidth={0} scroll="y">
     {props.files.map((f) => (
       <FileRow file={f} />
     ))}
@@ -143,25 +143,27 @@ function FileRow(props: { file: SvnFile }) {
   const { name, dir } = splitPath(f.path)
   return (
     <Stack gap="xs">
-      <Box direction="row" align="center" gap="xs">
-        <Box width={14} shrink={false}>
-          <Text tone={st.tone} size="xs" weight="semibold">
-            {st.code}
-          </Text>
+      <Box direction="row" align="center" gap="xs" minWidth={0}>
+        {/* The checkbox carries only the short status code; the long path is a
+            truncating Text so rows never overflow sideways. */}
+        <Box width={36} shrink={false}>
+          {canTick ? (
+            <Checkbox label={st.code} checked={read(checked).includes(f.path)} disabled={disabled} onChange={(on) => toggle(f.path, on)} />
+          ) : (
+            <Text tone={st.tone} size="xs" weight="semibold">
+              {st.code}
+            </Text>
+          )}
         </Box>
         <Box grow minWidth={0}>
-          {canTick ? (
-            <Checkbox label={name} description={dir || undefined} checked={read(checked).includes(f.path)} disabled={disabled} onChange={(on) => toggle(f.path, on)} />
-          ) : (
-            <Stack gap="none">
-              <Text truncate>{name}</Text>
-              {dir ? (
-                <Text muted size="xs" truncate>
-                  {dir}
-                </Text>
-              ) : null}
-            </Stack>
-          )}
+          <Stack gap="none">
+            <Text truncate>{name}</Text>
+            {dir ? (
+              <Text muted size="xs" truncate>
+                {dir}
+              </Text>
+            ) : null}
+          </Stack>
         </Box>
         <Box direction="row" shrink={false}>
           {f.status === 'modified' || f.status === 'added' || f.status === 'conflicted' ? (
@@ -270,12 +272,15 @@ function Changes(props: { files: SvnFile[] }) {
   return (
     <Collapsible title={`Changes · ${props.files.length}`} defaultOpen>
       <Stack gap="xs">
-        <FileList files={props.files} />
-        <Row justify="end">
+        <Row justify="between" align="center">
+          <Text muted size="xs">
+            {`${ticks.filter((p) => all.includes(p)).length} of ${all.length} selected`}
+          </Text>
           <Button size="sm" variant="ghost" disabled={!!b || !all.length} onPress={() => set(checked, allOn ? [] : all)}>
             {allOn ? 'Select none' : 'Select all'}
           </Button>
         </Row>
+        <FileList files={props.files} />
       </Stack>
     </Collapsible>
   )
