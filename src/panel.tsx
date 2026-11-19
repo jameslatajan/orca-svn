@@ -2,15 +2,17 @@
 import {
   atom,
   Badge,
+  Box,
   Button,
   Callout,
   Checkbox,
+  Collapsible,
   EmptyState,
-  Heading,
   IconButton,
   plugin,
   read,
   Row,
+  Separator,
   set,
   Spinner,
   Stack,
@@ -38,8 +40,41 @@ export const GROUPS: { status: FileStatus; title: string }[] = [
   { status: 'unversioned', title: 'Unversioned' }
 ]
 
+/** One-letter code as `svn status` prints it, with a tone. */
+export const STATUS_CODE: Record<FileStatus, { code: string; tone: 'neutral' | 'accent' | 'success' | 'warning' | 'danger' }> = {
+  conflicted: { code: 'C', tone: 'danger' },
+  modified: { code: 'M', tone: 'accent' },
+  added: { code: 'A', tone: 'success' },
+  deleted: { code: 'D', tone: 'danger' },
+  missing: { code: '!', tone: 'warning' },
+  unversioned: { code: '?', tone: 'neutral' }
+}
+
+const CHANGES: FileStatus[] = ['modified', 'added', 'deleted', 'missing']
+
 /** Files that can be committed (missing must be deleted or restored first; conflicts resolved). */
 export const committable = (f: SvnFile) => f.status !== 'missing' && f.status !== 'conflicted'
+
+/** "a/b/c.txt" -> { name: "c.txt", dir: "a/b" }. */
+export function splitPath(path: string): { name: string; dir: string } {
+  const i = path.lastIndexOf('/')
+  return i < 0 ? { name: path, dir: '' } : { name: path.slice(i + 1), dir: path.slice(0, i) }
+}
+
+/** Long lists scroll inside their section instead of pushing the panel. */
+const FileList = (props: { files: SvnFile[] }) => (
+  <Box direction="column" gap="xs" maxHeight={320} scroll="y">
+    {props.files.map((f) => (
+      <FileRow file={f} />
+    ))}
+  </Box>
+)
+
+/** Last segment of the repository-relative URL, e.g. "trunk" or "feature-x". */
+export function branchName(relativeUrl: string | undefined): string | null {
+  const parts = (relativeUrl ?? '').replace(/^\^/, '').split('/').filter(Boolean)
+  return parts.length ? parts[parts.length - 1] : null
+}
 
 function receive(s: SvnState): void {
   set(state, s)
@@ -89,7 +124,7 @@ const revert = (path: string) => {
   set(confirmRevert, null)
   return run('revert', () => plugin.request('svn.revert', { files: [path] }))
 }
-const add = (path: string) => run('add', () => plugin.request('svn.add', { files: [path] }))
+const add = (files: string[]) => run('add', () => plugin.request('svn.add', { files }))
 const resolve = (path: string) => run('resolve', () => plugin.request('svn.resolve', { files: [path] }))
 const diff = (path: string) => run('diff', async () => void (await plugin.request('svn.diff', { file: path })))
 const log = () => run('log', async () => void (await plugin.request('svn.log')))
@@ -102,31 +137,47 @@ function toggle(path: string, on: boolean): void {
 function FileRow(props: { file: SvnFile }) {
   const f = props.file
   const disabled = !!read(busy)
-  const canCommit = committable(f)
+  const canTick = committable(f) && f.status !== 'unversioned'
   const confirming = read(confirmRevert) === f.path
+  const st = STATUS_CODE[f.status]
+  const { name, dir } = splitPath(f.path)
   return (
     <Stack gap="xs">
-      <Row justify="between" align="center" gap="xs">
-        {canCommit ? (
-          <Checkbox label={f.path} checked={read(checked).includes(f.path)} disabled={disabled} onChange={(on) => toggle(f.path, on)} />
-        ) : (
-          <Text>{f.path}</Text>
-        )}
-        <Row gap="none">
-          {f.status !== 'unversioned' && f.status !== 'missing' && f.status !== 'deleted' ? (
+      <Box direction="row" align="center" gap="xs">
+        <Box width={14} shrink={false}>
+          <Text tone={st.tone} size="xs" weight="semibold">
+            {st.code}
+          </Text>
+        </Box>
+        <Box grow minWidth={0}>
+          {canTick ? (
+            <Checkbox label={name} description={dir || undefined} checked={read(checked).includes(f.path)} disabled={disabled} onChange={(on) => toggle(f.path, on)} />
+          ) : (
+            <Stack gap="none">
+              <Text truncate>{name}</Text>
+              {dir ? (
+                <Text muted size="xs" truncate>
+                  {dir}
+                </Text>
+              ) : null}
+            </Stack>
+          )}
+        </Box>
+        <Box direction="row" shrink={false}>
+          {f.status === 'modified' || f.status === 'added' || f.status === 'conflicted' ? (
             <IconButton icon="file-text" label={`Diff ${f.path}`} size="sm" variant="ghost" disabled={disabled} onPress={() => diff(f.path)} />
           ) : null}
           {f.status === 'unversioned' ? (
-            <IconButton icon="add" label={`Add ${f.path}`} size="sm" variant="ghost" disabled={disabled} onPress={() => add(f.path)} />
+            <IconButton icon="add" label={`Add ${f.path}`} size="sm" variant="ghost" disabled={disabled} onPress={() => add([f.path])} />
           ) : null}
           {f.status === 'conflicted' ? (
-            <IconButton icon="check" label={`Resolve ${f.path}`} size="sm" variant="ghost" disabled={disabled} onPress={() => resolve(f.path)} />
+            <IconButton icon="check" label={`Resolve ${f.path}`} size="sm" variant="ghost" tone="success" disabled={disabled} onPress={() => resolve(f.path)} />
           ) : null}
           {f.status !== 'unversioned' ? (
-            <IconButton icon="close" label={`Revert ${f.path}`} size="sm" variant="ghost" tone="danger" disabled={disabled} onPress={() => set(confirmRevert, f.path)} />
+            <IconButton icon="close" label={`Revert ${f.path}`} size="sm" variant="ghost" disabled={disabled} onPress={() => set(confirmRevert, f.path)} />
           ) : null}
-        </Row>
-      </Row>
+        </Box>
+      </Box>
       {confirming ? (
         <Row gap="xs">
           <Button size="sm" variant="solid" tone="danger" disabled={disabled} onPress={() => revert(f.path)}>
@@ -145,24 +196,20 @@ function CommitBox(props: { files: SvnFile[] }) {
   const ticks = read(checked)
   const msg = read(message)
   const b = read(busy)
-  const all = props.files.filter(committable).map((f) => f.path)
+  const total = props.files.filter((f) => committable(f) && f.status !== 'unversioned').length
   const reason = !ticks.length ? 'Tick the files to commit.' : !msg.trim() ? 'Write a commit message.' : null
+  const n = ticks.length
   return (
     <Stack gap="xs" align="stretch">
-      <Textarea label="Commit message" labelHidden placeholder="Commit message" rows={3} value={msg} disabled={!!b} onChange={(v) => set(message, v)} onSubmit={() => !reason && void commit()} />
+      <Textarea label="Commit message" labelHidden placeholder="Commit message (Ctrl+Enter to commit)" rows={2} value={msg} disabled={!!b} onChange={(v) => set(message, v)} onSubmit={() => !reason && void commit()} />
       <Row justify="between" align="center" gap="xs">
+        <Text muted size="xs">
+          {reason ?? `${n} of ${total} selected`}
+        </Text>
         <Button variant="solid" tone="accent" icon="check" disabled={!!b || !!reason} onPress={commit}>
-          {b === 'commit' ? 'Committing…' : `Commit (${ticks.length})`}
-        </Button>
-        <Button size="sm" variant="ghost" disabled={!!b || !all.length} onPress={() => set(checked, ticks.length === all.length ? [] : all)}>
-          {ticks.length === all.length && all.length ? 'Select none' : 'Select all'}
+          {b === 'commit' ? 'Committing…' : n ? `Commit ${n} ${n === 1 ? 'file' : 'files'}` : 'Commit'}
         </Button>
       </Row>
-      {reason && props.files.length ? (
-        <Text muted size="xs">
-          {reason}
-        </Text>
-      ) : null}
     </Stack>
   )
 }
@@ -170,33 +217,86 @@ function CommitBox(props: { files: SvnFile[] }) {
 function Header(props: { s: SvnState }) {
   const b = read(busy)
   const info = props.s.info
+  const ok = props.s.status === 'ok'
+  const branch = branchName(info?.relativeUrl)
+  const tool = (name: string, label: string, icon: 'download' | 'file' | 'refresh', onPress: () => unknown) =>
+    b === name ? <Spinner label={`${label}…`} labelHidden /> : <IconButton icon={icon} label={label} size="sm" variant="ghost" disabled={!!b} onPress={onPress} />
+  const where = info ? [props.s.workspace, info.relativeUrl || info.url].filter(Boolean).join(' · ') : null
   return (
-    <Stack gap="xs">
-      <Row justify="between" align="center">
-        <Heading level={3}>{props.s.workspace ?? 'SVN'}</Heading>
+    <Stack gap="none">
+      <Row justify="between" align="center" gap="xs">
+        <Row gap="xs" align="center">
+          <Text weight="semibold" truncate>
+            {branch ?? props.s.workspace ?? 'SVN'}
+          </Text>
+          {info ? <Badge tone="accent">{`r${info.revision ?? '?'}`}</Badge> : null}
+        </Row>
         <Row gap="none">
-          {props.s.status === 'ok' ? (
-            <IconButton icon="file" label="Show log" size="sm" variant="ghost" disabled={!!b} onPress={log} />
-          ) : null}
-          {b === 'refresh' ? <Spinner label="Refreshing" labelHidden /> : <IconButton icon="refresh" label="Refresh" size="sm" variant="ghost" disabled={!!b} onPress={refresh} />}
+          {ok ? tool('update', 'Update', 'download', update) : null}
+          {ok ? tool('log', 'Show log', 'file', log) : null}
+          {tool('refresh', 'Refresh', 'refresh', refresh)}
         </Row>
       </Row>
-      {info ? (
-        <Stack gap="none">
-          <Text muted size="xs">
-            {info.relativeUrl || info.url}
-          </Text>
-          <Row gap="xs" align="center">
-            <Badge tone="accent">{`r${info.revision ?? '?'}`}</Badge>
-            {info.lastAuthor ? (
-              <Text muted size="xs">
-                {`last change r${info.lastChangedRevision} by ${info.lastAuthor}`}
-              </Text>
-            ) : null}
-          </Row>
-        </Stack>
+      {where ? (
+        <Text muted size="xs" truncate>
+          {where}
+        </Text>
+      ) : null}
+      {info?.lastAuthor ? (
+        <Text muted size="xs">
+          {`last change r${info.lastChangedRevision} by ${info.lastAuthor}`}
+        </Text>
       ) : null}
     </Stack>
+  )
+}
+
+function Conflicts(props: { files: SvnFile[] }) {
+  if (!props.files.length) return null
+  return (
+    <Stack gap="xs">
+      <Text tone="danger" size="xs" weight="semibold">
+        {`Conflicts · ${props.files.length} · resolve before committing`}
+      </Text>
+      <FileList files={props.files} />
+    </Stack>
+  )
+}
+
+function Changes(props: { files: SvnFile[] }) {
+  if (!props.files.length) return null
+  const b = read(busy)
+  const all = props.files.filter(committable).map((f) => f.path)
+  const ticks = read(checked)
+  const allOn = !!all.length && all.every((p) => ticks.includes(p))
+  return (
+    <Collapsible title={`Changes · ${props.files.length}`} defaultOpen>
+      <Stack gap="xs">
+        <FileList files={props.files} />
+        <Row justify="end">
+          <Button size="sm" variant="ghost" disabled={!!b || !all.length} onPress={() => set(checked, allOn ? [] : all)}>
+            {allOn ? 'Select none' : 'Select all'}
+          </Button>
+        </Row>
+      </Stack>
+    </Collapsible>
+  )
+}
+
+function Unversioned(props: { files: SvnFile[] }) {
+  if (!props.files.length) return null
+  const b = read(busy)
+  return (
+    <Collapsible title={`Unversioned · ${props.files.length}`} defaultOpen={props.files.length <= 20}>
+      <Stack gap="xs">
+        <FileList files={props.files} />
+        <Row justify="end">
+          <Button size="sm" variant="ghost" icon="add" disabled={!!b} onPress={() => add(props.files.map((f) => f.path))}>
+            Add all
+          </Button>
+        </Row>
+      </Stack>
+    </Collapsible>
   )
 }
 
@@ -219,35 +319,22 @@ export default function Panel() {
   if (s.status === 'svn-missing') return wrap(<EmptyState title="svn not found" description={s.error} />)
   if (s.status === 'error') return wrap(<Callout tone="danger">Could not read SVN status: {s.error}</Callout>)
 
-  const b = read(busy)
+  const of = (st: FileStatus[]) => s.files.filter((f) => st.includes(f.status))
   return (
     <Stack gap="sm">
       <Header s={s} />
-      <Button variant="outline" icon="download" disabled={!!b} onPress={update}>
-        {b === 'update' ? 'Updating…' : 'Update'}
-      </Button>
+      <Separator />
       {noticeBox}
       {s.files.length ? <CommitBox files={s.files} /> : <Text muted>No local changes.</Text>}
-      {GROUPS.map((g) => {
-        const files = s.files.filter((f) => f.status === g.status)
-        if (!files.length) return null
-        return (
-          <Stack gap="xs">
-            <Text size="xs" muted>
-              {`${g.title} (${files.length})`}
-            </Text>
-            {files.map((f) => (
-              <FileRow file={f} />
-            ))}
-          </Stack>
-        )
-      })}
+      <Conflicts files={of(['conflicted'])} />
+      <Changes files={of(CHANGES)} />
+      <Unversioned files={of(['unversioned'])} />
     </Stack>
   )
 }
 
 export function setup(ctx: PanelContext): void {
   ctx.subscriptions.push(plugin.on('svn.changed', (payload) => receive(payload)))
-  ctx.subscriptions.push(plugin.on('svn.showCommit', () => set(notice, { tone: 'success', text: 'Tick files, write a message, then press Commit.' })))
+  ctx.subscriptions.push(plugin.on('svn.showCommit', () => set(notice, { tone: 'success', text: 'Write a message, tick files, then press Commit.' })))
   void load()
 }

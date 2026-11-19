@@ -24,16 +24,16 @@ test('groups files and commits only ticked ones', async () => {
     }
   })
   const view = await mount(panel, { host })
-  assert.ok(view.find({ text: 'Modified (1)' }))
-  assert.ok(view.find({ text: 'Unversioned (1)' }))
-  assert.ok(view.find({ text: 'Conflicted (1)' }))
+  assert.ok(view.find({ text: 'Conflicts · 1 · resolve before committing' }))
+  assert.ok(view.find({ text: 'trunk' }))
+  assert.ok(view.find({ text: 'M' }))
   assert.ok(view.find({ text: 'r5' }))
   // Commit disabled until a file is ticked and a message entered.
   assert.ok(view.find({ text: 'Tick the files to commit.' }))
   await view.toggle({ label: 'a.txt' })
   assert.ok(view.find({ text: 'Write a commit message.' }))
   await view.type({ label: 'Commit message' }, 'Fix typo')
-  await view.press({ text: 'Commit (1)' })
+  await view.press({ text: 'Commit 1 file' })
   assert.deepEqual(commits, [{ files: ['a.txt'], message: 'Fix typo' }])
   assert.ok(view.find({ text: 'Committed revision 6.' }))
   assert.ok(view.find({ text: 'No local changes.' }))
@@ -56,9 +56,30 @@ test('revert needs confirmation; errors are shown', async () => {
   assert.deepEqual(reverts, [])
   await view.press({ text: 'Confirm revert' })
   assert.deepEqual(reverts, [{ files: ['a.txt'] }])
-  await view.press({ text: 'Update' })
+  await view.press({ label: 'Update' })
   assert.ok(view.find({ text: 'SVN needs your login.' }))
   await view.unmount()
+})
+
+test('add all adds every unversioned file', async () => {
+  const adds: unknown[] = []
+  const host = mockHost({
+    requests: {
+      'svn.state': { ...dirty, files: [...dirty.files, { path: 'm.txt', status: 'unversioned' }] },
+      'svn.add': (input) => (adds.push(input), { message: 'Added 2 files.', state: clean })
+    }
+  })
+  const view = await mount(panel, { host })
+  assert.ok(view.find({ text: 'Unversioned · 2' }) ?? view.find({ label: 'Unversioned · 2' }))
+  await view.press({ text: 'Add all' })
+  assert.deepEqual(adds, [{ files: ['n.txt', 'm.txt'] }])
+  await view.unmount()
+})
+
+test('branchName', () => {
+  assert.equal(panel.branchName('^/branches/feature-x'), 'feature-x')
+  assert.equal(panel.branchName('^/trunk'), 'trunk')
+  assert.equal(panel.branchName(''), null)
 })
 
 test('empty states', async () => {
