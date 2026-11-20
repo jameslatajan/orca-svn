@@ -8,11 +8,13 @@ import {
   Checkbox,
   Collapsible,
   EmptyState,
+  Grid,
   IconButton,
   Input,
   plugin,
   read,
   Row,
+  Select,
   Separator,
   Skeleton,
   set,
@@ -22,7 +24,7 @@ import {
   Textarea,
   type PanelContext
 } from 'orca'
-import type { ActionResult, FileStatus, SvnFile, SvnState } from './protocol'
+import type { ActionResult, BranchTarget, FileStatus, SvnFile, SvnState } from './protocol'
 
 const state = atom<SvnState | null>(null)
 const busy = atom<string | null>(null)
@@ -36,6 +38,11 @@ const confirmRevert = atom<string | null>(null)
 const query = atom('')
 /** Path whose ignore choices are open. */
 const ignoreOpen = atom<string | null>(null)
+/** This project's trunk/branches from svn.branches; null until loaded. */
+const branches = atom<BranchTarget[] | null>(null)
+const branchChoice = atom('')
+/** Set once the guard passed: the warning to confirm (or '' for none). */
+const switchArmed = atom<string | null>(null)
 
 /** Case-insensitive substring match on the path; empty query matches everything. */
 export function matches(f: SvnFile, q: string): boolean {
@@ -130,6 +137,28 @@ async function run(label: string, fn: () => Promise<ActionResult | void>): Promi
 
 const refresh = () => run('refresh', async () => void receive(await plugin.request('svn.state')))
 const update = () => run('update', () => plugin.request('svn.update'))
+const loadBranches = () =>
+  run('branches', async () => {
+    const { targets } = await plugin.request('svn.branches')
+    set(branches, targets)
+    set(branchChoice, targets.find((t) => !t.current)?.id ?? '')
+    set(switchArmed, null)
+  })
+/** First press runs the guard (blocks or arms with a warning); the second press switches. */
+async function switchBranch(): Promise<void> {
+  const lane = read(branchChoice)
+  if (read(switchArmed) == null) {
+    await run('switch', async () => {
+      const check = await plugin.request('svn.switchCheck', { lane })
+      if (check.block) throw new Error(check.block)
+      set(switchArmed, check.warning ?? '')
+    })
+    return
+  }
+  set(switchArmed, null)
+  const ok = await run('switch', () => plugin.request('svn.switch', { lane }))
+  if (ok) set(branches, null)
+}
 async function commit(): Promise<void> {
   const files = read(checked)
   const ok = await run('commit', () => plugin.request('svn.commit', { files, message: read(message) }))
@@ -231,6 +260,52 @@ function FileRow(props: { file: SvnFile }) {
           </Button>
         </Row>
       ) : null}
+    </Stack>
+  )
+}
+
+/** Switch between this project's trunk and branches (same guard as the History panel). */
+function Branches() {
+  const b = read(busy)
+  const list = read(branches)
+  if (!list) {
+    return (
+      <Stack gap="none" align="stretch">
+        {b === 'branches' ? (
+          <Spinner label="Loading branches…" />
+        ) : (
+          <Button size="sm" variant="outline" icon="branch" disabled={!!b} onPress={loadBranches}>
+            Switch branch…
+          </Button>
+        )}
+      </Stack>
+    )
+  }
+  if (list.length < 2) return <Text muted size="xs">No other branches for this project.</Text>
+  const choice = read(branchChoice)
+  const target = list.find((t) => t.id === choice)
+  const armed = read(switchArmed)
+  return (
+    <Stack gap="xs" align="stretch">
+      <Select
+        label="Switch to"
+        value={choice}
+        disabled={!!b}
+        options={list.map((t) => ({ value: t.id, label: t.current ? `${t.name} (current)` : t.name, disabled: t.current }))}
+        onChange={(v) => {
+          set(branchChoice, v)
+          set(switchArmed, null)
+        }}
+      />
+      {armed ? <Callout tone="warning">{armed}</Callout> : null}
+      <Grid columns={2} gap="xs">
+        <Button size="sm" variant={armed != null ? 'solid' : 'outline'} tone={armed != null ? 'danger' : undefined} icon="branch" disabled={!!b || !target || target.current} onPress={switchBranch}>
+          {b === 'switch' ? 'Switching…' : armed != null ? 'Confirm' : 'Switch'}
+        </Button>
+        <Button size="sm" variant="outline" onPress={() => set(branches, null)}>
+          Cancel
+        </Button>
+      </Grid>
     </Stack>
   )
 }
@@ -408,6 +483,7 @@ export default function Panel() {
   return (
     <Stack gap="sm">
       <Header s={s} />
+      <Branches />
       <Separator />
       {s.behind ? (
         <Callout tone="warning" title="Not on the latest revision">

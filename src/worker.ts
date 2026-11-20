@@ -3,7 +3,7 @@ import type { OrcaWorkerApi } from 'orca/worker'
 import type { ActionResult, SvnInfo, SvnState } from './protocol'
 import { isAbsolute, relative } from 'node:path'
 import * as svn from './svn'
-import { loadHistory, loadMore, type GraphInput, type LaneUrls } from './history'
+import { loadHistory, parseLayout, loadMore, type GraphInput, type LaneUrls } from './history'
 import { watchFolder, type FolderWatch } from './watch'
 import * as project from './project'
 
@@ -265,10 +265,12 @@ export default function activate(orca: OrcaWorkerApi): void {
   // ---------- History ----------
   /** Lane id → URL from the last history load; requests name lanes, never raw URLs. */
   let laneUrls: LaneUrls = new Map()
+  /** Lane id → URL from the last `svn.branches` (the panel's switcher). */
+  let branchUrls = new Map<string, string>()
   let historyInput: { path: string; input: GraphInput } | null = null
 
   const laneUrl = (lane: string) => {
-    const url = laneUrls.get(lane)
+    const url = laneUrls.get(lane) ?? branchUrls.get(lane)
     if (!url) throw invalid('Unknown branch; refresh the history.')
     return url
   }
@@ -377,6 +379,32 @@ export default function activate(orca: OrcaWorkerApi): void {
       const r = await project.createBranch(options.runner, ws.path, root, scope, name, message)
       forgetHeads()
       return { message: `Created ^${r.path}${r.revision != null ? ` at r${r.revision}` : ''} from ^${scope.trunkPath}.`, path: r.path, revision: r.revision }
+    })
+  })
+
+  orca.panels.handle('svn.branches', async () => {
+    const ws = await local()
+    return svnInvalid(async () => {
+      const info = await svn.info(options.runner, ws.path)
+      const root = rootOf(info)
+      const current = '/' + info.relativeUrl.replace(/^\^/, '').split('/').filter(Boolean).join('/')
+      const urlOf = (p: string) => root.replace(/\/+$/, '') + p
+      const lines: { id: string; name: string; path: string }[] = []
+      const scope = await project.projectScope(options.runner, ws.path, root, info.relativeUrl, await configOf(ws.path))
+      if (scope) {
+        lines.push({ id: 'trunk', name: 'trunk', path: scope.trunkPath })
+        for (const b of [...scope.branches].sort((x, y) => x.name.localeCompare(y.name))) lines.push({ id: `b:${b.name}`, name: b.name, path: b.path })
+      } else {
+        const layout = parseLayout(info.relativeUrl)
+        if (layout) {
+          lines.push({ id: 'trunk', name: 'trunk', path: `${layout.prefix}/trunk${layout.suffix}` })
+          const ls = await svn.list(options.runner, ws.path, urlOf(`${layout.prefix}/branches`)).catch(() => [])
+          for (const e of ls.filter((e) => e.kind === 'dir').sort((x, y) => x.name.localeCompare(y.name)))
+            lines.push({ id: `b:${e.name}`, name: e.name, path: `${layout.prefix}/branches/${e.name}${layout.suffix}` })
+        }
+      }
+      branchUrls = new Map(lines.map((l) => [l.id, urlOf(l.path)]))
+      return { targets: lines.map((l) => ({ id: l.id, name: l.name, current: l.path === current })) }
     })
   })
 

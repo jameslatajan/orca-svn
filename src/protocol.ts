@@ -62,6 +62,9 @@ export type RevisionDetail = {
   paths: { action: string; path: string; copyFrom?: string }[]
 }
 
+/** A line the working copy can switch to; `id` is a lane id ("trunk" or "b:<name>"). */
+export type BranchTarget = { id: string; name: string; current: boolean }
+
 declare module 'orca' {
   interface PluginRequests {
     /** SVN state of the focused workspace. */
@@ -90,6 +93,8 @@ declare module 'orca' {
     'svn.switchCheck': { input: { lane: string }; output: { block?: string; warning?: string } }
     /** Creates ^/branches/<project>/<name> from ^/trunk/<project> on the server (no switch). */
     'svn.branchCreate': { input: { name: string; message?: string }; output: { message: string; path: string; revision: number | null } }
+    /** This project's trunk and branches, for the panel's switcher; ids work with svn.switchCheck / svn.switch. */
+    'svn.branches': { output: { targets: BranchTarget[] } }
     /** Ignores files: `git` appends to the workspace .gitignore, `svn` adds to the folder's svn:ignore. */
     'svn.ignore': { input: { files: string[]; target: 'git' | 'svn' }; output: ActionResult }
   }
