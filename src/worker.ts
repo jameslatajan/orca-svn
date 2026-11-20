@@ -3,7 +3,7 @@ import type { OrcaWorkerApi } from 'orca/worker'
 import type { ActionResult, SvnState } from './protocol'
 import { isAbsolute, relative } from 'node:path'
 import * as svn from './svn'
-import { loadHistory, loadMore, type GraphInput, type LaneUrls } from './history'
+import { listBranches, loadHistory, loadMore, type GraphInput, type LaneUrls } from './history'
 import { watchFolder, type FolderWatch } from './watch'
 
 /** Injection points and timings; tests change them. */
@@ -307,6 +307,34 @@ export default function activate(orca: OrcaWorkerApi): void {
   orca.panels.handle('svn.switch', async ({ lane }) => {
     const url = laneUrl(lane)
     const { message, state } = await act((ws) => svn.switchTo(options.runner, ws.path, url), (r) => `Switched to ${lane.replace(/^b:/, '')}${r != null ? ` at r${r}` : ''}.`)
+    return { message, state }
+  })
+
+  /** Target id → URL from the last `svn.branches`. */
+  let branchUrls = new Map<string, string>()
+  orca.panels.handle('svn.branches', async () => {
+    const ws = await local()
+    return svnInvalid(async () => {
+      const { targets, urls } = await listBranches(options.runner, ws.path)
+      branchUrls = urls
+      return { targets }
+    })
+  })
+  orca.panels.handle('svn.switchBranch', async ({ id }) => {
+    const url = branchUrls.get(id)
+    if (!url) throw invalid('Unknown branch; reload the branch list.')
+    const { message, state } = await act((ws) => svn.switchTo(options.runner, ws.path, url), (r) => `Switched to ${id.replace(/^b:/, '')}${r != null ? ` at r${r}` : ''}.`)
+    return { message, state }
+  })
+  orca.panels.handle('svn.ignore', async ({ files, target }) => {
+    if (target !== 'git' && target !== 'svn') throw invalid('Bad ignore target.')
+    const { message, state } = await act(
+      async (ws) => (target === 'git' ? svn.ignoreGit(ws.path, files) : svn.ignoreSvn(options.runner, ws.path, files)),
+      (added) =>
+        added.length
+          ? `Added ${added.join(', ')} to ${target === 'git' ? '.gitignore' : 'svn:ignore'}.`
+          : `Already in ${target === 'git' ? '.gitignore' : 'svn:ignore'}.`
+    )
     return { message, state }
   })
 

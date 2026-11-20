@@ -1,7 +1,7 @@
 // Builds the revision tree for the History panel from `svn ls` / `svn log` / `svn:mergeinfo`.
 // The pure parts (layout, graph) are exported for tests; `loadHistory` does the svn calls.
 import * as svn from './svn'
-import type { HistoryGraph, HistoryLane, HistoryMerge, HistoryRev, HistoryTag } from './protocol'
+import type { BranchTarget, HistoryGraph, HistoryLane, HistoryMerge, HistoryRev, HistoryTag } from './protocol'
 
 export const LIMITS = { branches: 8, tags: 10, revisionsPerLane: 40 }
 
@@ -232,4 +232,24 @@ export async function loadHistory(
   progress({ step: 'Done', done: 3, total: 3 })
   const { input, graph } = emit(lanes, tags, await merges)
   return { graph, urls, input }
+}
+/** Trunk and every branch the working copy can switch to, with their URLs (kept in the worker). */
+export async function listBranches(run: svn.SvnRunner, cwd: string): Promise<{ targets: BranchTarget[]; urls: Map<string, string> }> {
+  const [info, root] = await Promise.all([svn.info(run, cwd), svn.reposRoot(run, cwd)])
+  const layout = parseLayout(info.relativeUrl)
+  if (!layout) return { targets: [], urls: new Map() }
+  const current = info.relativeUrl.replace(/^\^/, '').replace(/\/+$/, '')
+  const urlOf = (path: string) => root.replace(/\/+$/, '') + path
+  const urls = new Map<string, string>()
+  const targets: BranchTarget[] = []
+  const push = (id: string, name: string, kind: BranchTarget['kind'], path: string) => {
+    urls.set(id, urlOf(path))
+    targets.push({ id, name, kind, current: path === current })
+  }
+  push('trunk', 'trunk', 'trunk', `${layout.prefix}/trunk${layout.suffix}`)
+  const entries = await svn.list(run, cwd, urlOf(`${layout.prefix}/branches`)).catch(() => [])
+  for (const e of entries.filter((e) => e.kind === 'dir').sort((a, b) => a.name.localeCompare(b.name))) {
+    push(`b:${e.name}`, e.name, 'branch', `${layout.prefix}/branches/${e.name}${layout.suffix}`)
+  }
+  return { targets, urls }
 }

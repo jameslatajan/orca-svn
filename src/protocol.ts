@@ -60,6 +60,9 @@ export type RevisionDetail = {
   paths: { action: string; path: string; copyFrom?: string }[]
 }
 
+/** A line the working copy can switch to; `id` is "trunk" or "b:<name>". */
+export type BranchTarget = { id: string; name: string; kind: 'trunk' | 'branch'; current: boolean }
+
 declare module 'orca' {
   interface PluginRequests {
     /** SVN state of the focused workspace. */
@@ -84,6 +87,12 @@ declare module 'orca' {
     'svn.openDiff': { input: { lane: string; revision: number }; output: { path: string } }
     /** `svn switch` the working copy to a lane. */
     'svn.switch': { input: { lane: string }; output: ActionResult }
+    /** Trunk and branches (standard layout only; contacts the server). */
+    'svn.branches': { output: { targets: BranchTarget[] } }
+    /** `svn switch` to a target from the last `svn.branches`. */
+    'svn.switchBranch': { input: { id: string }; output: ActionResult }
+    /** Ignores files: `git` appends to the workspace .gitignore, `svn` adds to the folder's svn:ignore. */
+    'svn.ignore': { input: { files: string[]; target: 'git' | 'svn' }; output: ActionResult }
   }
   interface PluginPanelEvents {
     /** Fresh state after a workspace switch, file change, action or refresh. */

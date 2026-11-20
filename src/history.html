@@ -32,7 +32,7 @@
   #scroll { flex: 1; min-height: 0; overflow-y: auto; overflow-x: hidden; border-top: 1px solid var(--orca-border, #e5e5e5); }
   #graph { position: relative; }
   svg { position: absolute; left: 0; top: 0; pointer-events: none; }
-  .row { display: flex; align-items: center; height: 40px; padding-right: 10px; cursor: pointer; }
+  .row { display: flex; align-items: center; height: 40px; padding: 0 10px 0 8px; cursor: pointer; }
   .row:hover { background: var(--orca-muted, #f5f5f5); }
   .row.sel { background: var(--orca-accent, #eef2ff); color: var(--orca-accent-foreground, inherit); }
   .txt { flex: 1; min-width: 0; }
@@ -69,14 +69,25 @@
   .sk b { height: 9px; }
   @keyframes shimmer { from { background-position: 200% 0; } to { background-position: -200% 0; } }
   .stale { opacity: .45; pointer-events: none; transition: opacity .2s; }
+  .range { display: flex; flex-wrap: wrap; align-items: center; gap: 6px; padding: 4px 12px; }
+  .range input[type=search] { flex: 1 1 100%; padding: 3px 6px; }
+  .range label { display: flex; align-items: center; gap: 4px; flex: 1 1 0; min-width: 0; }
+  .range input[type=date] { flex: 1; min-width: 0; width: 100%; }
+  .range input { font: inherit; font-size: 12px; color: inherit; background: transparent; border: 1px solid var(--orca-border, #ddd); border-radius: 4px; padding: 1px 4px; }
   @media (prefers-reduced-motion: reduce) { .spin, .bar.indet > div, .sk i, .sk b { animation: none; } }
 </style>
 </head>
 <body>
 <header>
   <div><b>History</b> <span id="where" class="muted xs"></span></div>
-  <button class="icon" id="refresh" title="Refresh history" aria-label="Refresh history">⟳</button>
+  <span style="display:flex;gap:2px;flex:none"><button class="icon" id="clearRange" title="Clear filters" aria-label="Clear filters" hidden>✕</button>
+  <button class="icon" id="refresh" title="Refresh history" aria-label="Refresh history">⟳</button></span>
 </header>
+<div class="range xs" role="group" aria-label="Filter revisions">
+  <input type="search" id="q" placeholder="Search commit messages" aria-label="Search commit messages">
+  <label>From <input type="date" id="from" aria-label="From date"></label>
+  <label>To <input type="date" id="to" aria-label="To date"></label>
+</div>
 <div id="notice"></div>
 <div id="legend" class="legend"></div>
 <div id="loader" hidden role="status" aria-live="polite">
@@ -179,7 +190,33 @@
     }
     nearBottom()
   }
+  // Date range filter (local days, inclusive); applied to loaded revisions, paging further back as needed.
+  const range = { from: '', to: '', q: '' }
+  const dayOf = (iso) => { const d = new Date(iso); return isNaN(d) ? '' : `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}` }
+  const inRange = (r) => { const d = dayOf(r.date); return (!range.from || d >= range.from) && (!range.to || d <= range.to) && (!range.q || `r${r.revision} ${r.message} ${r.author}`.toLowerCase().includes(range.q)) }
+  const filtering = () => !!(range.from || range.to || range.q)
+  /** Older pages can't contain revisions in range once the oldest loaded one is before `from`. */
+  const pastFrom = () => {
+    if (!range.from || !graph || !graph.revisions.length) return false
+    const oldest = new Map()
+    for (const r of graph.revisions) oldest.set(r.lane, r.date) // newest first, so the last one wins
+    return [...oldest.values()].every((d) => dayOf(d) < range.from)
+  }
+  function onRange() {
+    range.from = $('from').value; range.to = $('to').value; range.q = $('q').value.trim().toLowerCase()
+    $('clearRange').hidden = !filtering()
+    if (selected && graph && !graph.revisions.some((r) => r.revision === selected.revision && r.lane === selected.lane && inRange(r))) closeDetail()
+    $('scroll').scrollTop = 0
+    render(); nearBottom()
+  }
+  let qTimer = 0
+  $('q').addEventListener('input', () => { clearTimeout(qTimer); qTimer = setTimeout(onRange, 200) })
+  $('from').addEventListener('change', onRange)
+  $('to').addEventListener('change', onRange)
+  $('clearRange').addEventListener('click', () => { $('from').value = ''; $('to').value = ''; $('q').value = ''; onRange() })
+
   function nearBottom() {
+    if (pastFrom()) return
     const s = $('scroll')
     if (s.scrollTop + s.clientHeight >= s.scrollHeight - ROW * 5) loadOlder()
   }
@@ -187,13 +224,16 @@
 
   function render() {
     const g = $('graph'), lg = $('legend')
-    $('more').textContent = graph && graph.revisions.length ? (graph.hasMore ? '' : 'Start of history') : ''
-    if (!graph || !graph.revisions.length) { g.innerHTML = graph ? '<div class="notice">No revisions.</div>' : ''; lg.innerHTML = ''; $('where').textContent = ''; return }
+    const revs = graph ? graph.revisions.filter(inRange) : []
+    const end = graph && (!graph.hasMore || pastFrom())
+    $('more').textContent = graph && graph.revisions.length
+      ? (filtering() ? `${revs.length} of ${graph.revisions.length} loaded revisions match` + (end ? '' : ' · loading older…') : (graph.hasMore ? '' : 'Start of history'))
+      : ''
+    if (!graph || !revs.length) { g.innerHTML = graph ? `<div class="notice">${filtering() ? 'No revisions match the filter.' : 'No revisions.'}</div>` : ''; lg.innerHTML = ''; $('where').textContent = ''; return }
     const laneIx = new Map(graph.lanes.map((l, i) => [l.id, i]))
     const color = (id) => COLORS[(laneIx.get(id) ?? 0) % COLORS.length]
     const x = (id) => PAD + (laneIx.get(id) ?? 0) * LANE
     const cy = (i) => i * ROW + ROW / 2
-    const revs = graph.revisions
     const rowOf = (lane, rev) => revs.findIndex((r) => r.lane === lane && r.revision <= rev)
     const width = PAD * 2 + Math.max(0, graph.lanes.length - 1) * LANE
     const height = revs.length * ROW
