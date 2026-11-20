@@ -9,10 +9,12 @@ import {
   Collapsible,
   EmptyState,
   IconButton,
+  Input,
   plugin,
   read,
   Row,
   Separator,
+  Skeleton,
   set,
   Spinner,
   Stack,
@@ -30,6 +32,16 @@ const checked = atom<string[]>([])
 const message = atom('commitMessage', '', { persist: 'plugin' })
 /** Path waiting for "Confirm revert". */
 const confirmRevert = atom<string | null>(null)
+/** Filter text for the changes lists. */
+const query = atom('')
+/** Path whose ignore choices are open. */
+const ignoreOpen = atom<string | null>(null)
+
+/** Case-insensitive substring match on the path; empty query matches everything. */
+export function matches(f: SvnFile, q: string): boolean {
+  const t = q.trim().toLowerCase()
+  return !t || f.path.toLowerCase().includes(t)
+}
 
 export const GROUPS: { status: FileStatus; title: string }[] = [
   { status: 'conflicted', title: 'Conflicted' },
@@ -134,6 +146,10 @@ const add = (files: string[]) => run('add', () => plugin.request('svn.add', { fi
 const resolve = (path: string) => run('resolve', () => plugin.request('svn.resolve', { files: [path] }))
 const diff = (path: string) => run('diff', async () => void (await plugin.request('svn.diff', { file: path })))
 const log = () => run('log', async () => void (await plugin.request('svn.log')))
+const ignore = (path: string, target: 'git' | 'svn') => {
+  set(ignoreOpen, null)
+  return run('ignore', () => plugin.request('svn.ignore', { files: [path], target }))
+}
 
 function toggle(path: string, on: boolean): void {
   const now = read(checked).filter((p) => p !== path)
@@ -182,6 +198,9 @@ function FileRow(props: { file: SvnFile }) {
           {f.status === 'conflicted' ? (
             <IconButton icon="check" label={`Resolve ${f.path}`} size="sm" variant="ghost" tone="success" disabled={disabled} onPress={() => resolve(f.path)} />
           ) : null}
+          {!f.ignored && f.status !== 'conflicted' ? (
+            <IconButton icon="more" label={`Ignore ${f.path}`} size="sm" variant="ghost" disabled={disabled} onPress={() => set(ignoreOpen, read(ignoreOpen) === f.path ? null : f.path)} />
+          ) : null}
           {f.status !== 'unversioned' ? (
             <IconButton icon="close" label={`Revert ${f.path}`} size="sm" variant="ghost" disabled={disabled} onPress={() => set(confirmRevert, f.path)} />
           ) : null}
@@ -193,6 +212,21 @@ function FileRow(props: { file: SvnFile }) {
             Confirm revert
           </Button>
           <Button size="sm" variant="ghost" onPress={() => set(confirmRevert, null)}>
+            Cancel
+          </Button>
+        </Row>
+      ) : null}
+      {read(ignoreOpen) === f.path ? (
+        <Row gap="xs">
+          <Button size="sm" variant="outline" disabled={disabled} onPress={() => ignore(f.path, 'git')}>
+            Add to .gitignore
+          </Button>
+          {f.status === 'unversioned' ? (
+            <Button size="sm" variant="outline" disabled={disabled} onPress={() => ignore(f.path, 'svn')}>
+              Add to svn:ignore
+            </Button>
+          ) : null}
+          <Button size="sm" variant="ghost" onPress={() => set(ignoreOpen, null)}>
             Cancel
           </Button>
         </Row>
@@ -324,9 +358,34 @@ function Unversioned(props: { files: SvnFile[] }) {
   )
 }
 
+/** Skeleton of the panel (header, commit box, file rows) while the first status loads. */
+function LoadingPlaceholder() {
+  const fileRow = (
+    <Row gap="xs" align="center">
+      <Skeleton shape="circle" />
+      <Box grow minWidth={0}>
+        <Skeleton lines={2} />
+      </Box>
+    </Row>
+  )
+  return (
+    <Stack gap="sm">
+      <Skeleton label="Loading SVN status" lines={2} />
+      <Separator />
+      <Skeleton shape="block" />
+      <Skeleton lines={1} />
+      {fileRow}
+      {fileRow}
+      {fileRow}
+      {fileRow}
+      {fileRow}
+    </Stack>
+  )
+}
+
 export default function Panel() {
   const s = read(state)
-  if (!s) return <Spinner label="Loading SVN status" />
+  if (!s) return <LoadingPlaceholder />
   const n = read(notice)
   const noticeBox = n ? <Callout tone={n.tone}>{n.text}</Callout> : null
 
@@ -343,7 +402,9 @@ export default function Panel() {
   if (s.status === 'svn-missing') return wrap(<EmptyState title="svn not found" description={s.error} />)
   if (s.status === 'error') return wrap(<Callout tone="danger">Could not read SVN status: {s.error}</Callout>)
 
-  const of = (st: FileStatus[]) => s.files.filter((f) => !f.ignored && st.includes(f.status))
+  const q = read(query)
+  const shown = s.files.filter((f) => matches(f, q))
+  const of = (st: FileStatus[]) => shown.filter((f) => !f.ignored && st.includes(f.status))
   return (
     <Stack gap="sm">
       <Header s={s} />
@@ -362,10 +423,12 @@ export default function Panel() {
       ) : null}
       {noticeBox}
       {s.files.length ? <CommitBox files={s.files} /> : <Text muted>No local changes.</Text>}
-      <Conflicts files={s.files.filter((f) => f.status === 'conflicted')} />
+      {s.files.length ? <Input label="Search changes" labelHidden type="search" placeholder="Search changed files" value={q} onChange={(v) => set(query, v)} /> : null}
+      {s.files.length && !shown.length ? <Text muted size="xs">{`No changed files match "${q.trim()}".`}</Text> : null}
+      <Conflicts files={shown.filter((f) => f.status === 'conflicted')} />
       <Changes files={of(CHANGES)} />
       <Unversioned files={of(['unversioned'])} />
-      <GitIgnored files={s.files.filter((f) => f.ignored && f.status !== 'conflicted')} />
+      <GitIgnored files={shown.filter((f) => f.ignored && f.status !== 'conflicted')} />
     </Stack>
   )
 }

@@ -90,6 +90,8 @@ declare module 'orca' {
     'svn.switchCheck': { input: { lane: string }; output: { block?: string; warning?: string } }
     /** Creates ^/branches/<project>/<name> from ^/trunk/<project> on the server (no switch). */
     'svn.branchCreate': { input: { name: string; message?: string }; output: { message: string; path: string; revision: number | null } }
+    /** Ignores files: `git` appends to the workspace .gitignore, `svn` adds to the folder's svn:ignore. */
+    'svn.ignore': { input: { files: string[]; target: 'git' | 'svn' }; output: ActionResult }
   }
   interface PluginPanelEvents {
     /** Fresh state after a workspace switch, file change, action or refresh. */

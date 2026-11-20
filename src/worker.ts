@@ -389,6 +389,18 @@ export default function activate(orca: OrcaWorkerApi): void {
     return { message, state }
   })
 
+  orca.panels.handle('svn.ignore', async ({ files, target }) => {
+    if (target !== 'git' && target !== 'svn') throw invalid('Bad ignore target.')
+    const { message, state } = await act(
+      async (ws) => (target === 'git' ? svn.ignoreGit(ws.path, files) : svn.ignoreSvn(options.runner, ws.path, files)),
+      (added) =>
+        added.length
+          ? `Added ${added.join(', ')} to ${target === 'git' ? '.gitignore' : 'svn:ignore'}.`
+          : `Already in ${target === 'git' ? '.gitignore' : 'svn:ignore'}.`
+    )
+    return { message, state }
+  })
+
   orca.events.on('workspace.changed', () => void refresh())
 
   const notify = async (body: string) => {

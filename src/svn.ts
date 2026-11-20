@@ -1,8 +1,8 @@
 // Runs the svn CLI (no shell, always --non-interactive) and parses its XML output.
 import { execFile } from 'node:child_process'
-import { mkdirSync, mkdtempSync, readdirSync, rmSync, statSync, writeFileSync } from 'node:fs'
+import { appendFileSync, existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, statSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
-import { isAbsolute, join, relative, resolve } from 'node:path'
+import { dirname, isAbsolute, join, relative, resolve } from 'node:path'
 import type { FileStatus, SvnInfo, SvnFile } from './protocol'
 
 export type RunResult = { stdout: string; stderr: string; code: number }
@@ -403,4 +403,44 @@ export function saveDiff(dir: string, name: string, text: string): string {
     .slice(KEEP_DIFFS)
   for (const o of old) rmSync(join(dir, o.f), { force: true })
   return file
+}
+
+// ---------- Ignore ----------
+
+/** Adds each file's name to its folder's svn:ignore (the folder must be versioned). Returns the patterns added. */
+export async function ignoreSvn(run: SvnRunner, cwd: string, files: readonly string[]): Promise<string[]> {
+  const byDir = new Map<string, Set<string>>()
+  for (const abs of safeFiles(cwd, files)) {
+    const dir = dirname(abs)
+    const name = abs.slice(dir.length + 1)
+    byDir.set(dir, (byDir.get(dir) ?? new Set()).add(name))
+  }
+  const added: string[] = []
+  for (const [dir, names] of byDir) {
+    const r = await run(['--non-interactive', 'propget', 'svn:ignore', dir], cwd, DEFAULT_TIMEOUT_MS)
+    const have = (r.code === 0 ? r.stdout : '').split(/\r?\n/).map((s) => s.trim()).filter(Boolean)
+    const fresh = [...names].filter((n) => !have.includes(n))
+    if (!fresh.length) continue
+    const tmp = mkdtempSync(join(tmpdir(), 'orca-svn-ign-'))
+    try {
+      const file = join(tmp, 'ignore.txt')
+      writeFileSync(file, [...have, ...fresh].join('\n') + '\n', 'utf8')
+      await svn(run, ['propset', 'svn:ignore', '-F', file, dir], cwd)
+    } finally {
+      rmSync(tmp, { recursive: true, force: true })
+    }
+    for (const n of fresh) added.push(relative(cwd, join(dir, n)).replace(/\\/g, '/'))
+  }
+  return added
+}
+
+/** Appends "/path" lines to <cwd>/.gitignore, skipping ones already there. Returns the lines added. */
+export function ignoreGit(cwd: string, files: readonly string[]): string[] {
+  const lines = safeFiles(cwd, files).map((abs) => '/' + relative(cwd, abs).replace(/\\/g, '/'))
+  const file = join(cwd, '.gitignore')
+  const text = existsSync(file) ? readFileSync(file, 'utf8') : ''
+  const have = new Set(text.split(/\r?\n/).map((s) => s.trim()))
+  const fresh = [...new Set(lines)].filter((l) => !have.has(l) && !have.has(l.slice(1)))
+  if (fresh.length) appendFileSync(file, (text && !text.endsWith('\n') ? '\n' : '') + fresh.join('\n') + '\n', 'utf8')
+  return fresh
 }
