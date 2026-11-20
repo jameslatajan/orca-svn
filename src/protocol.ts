@@ -23,6 +23,8 @@ export type SvnState = {
   error?: string
   /** Latest revision on the server that changed this URL, when newer than the working copy. */
   behind?: { head: number }
+  /** Project and line in a multi-project repository, e.g. { project: 'clinicsys', line: 'trunk' }. */
+  where?: { project: string | null; line: string }
 }
 
 /** What an action reports back to the panel, plus fresh state. */
@@ -84,6 +86,10 @@ declare module 'orca' {
     'svn.openDiff': { input: { lane: string; revision: number }; output: { path: string } }
     /** `svn switch` the working copy to a lane. */
     'svn.switch': { input: { lane: string }; output: ActionResult }
+    /** Dry run of the switch guard: `block` stops the switch, `warning` needs a confirm. */
+    'svn.switchCheck': { input: { lane: string }; output: { block?: string; warning?: string } }
+    /** Creates ^/branches/<project>/<name> from ^/trunk/<project> on the server (no switch). */
+    'svn.branchCreate': { input: { name: string; message?: string }; output: { message: string; path: string; revision: number | null } }
   }
   interface PluginPanelEvents {
     /** Fresh state after a workspace switch, file change, action or refresh. */

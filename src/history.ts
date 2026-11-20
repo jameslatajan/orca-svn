@@ -1,6 +1,7 @@
 // Builds the revision tree for the History panel from `svn ls` / `svn log` / `svn:mergeinfo`.
 // The pure parts (layout, graph) are exported for tests; `loadHistory` does the svn calls.
 import * as svn from './svn'
+import { detectProject, projectScope, type ProjectConfig, type Scope } from './project'
 import type { HistoryGraph, HistoryLane, HistoryMerge, HistoryRev, HistoryTag } from './protocol'
 
 export const LIMITS = { branches: 8, tags: 10, revisionsPerLane: 40 }
@@ -142,10 +143,13 @@ export async function loadHistory(
   run: svn.SvnRunner,
   cwd: string,
   progress: Progress = () => {},
-  partial: Partial = () => {}
+  partial: Partial = () => {},
+  config: ProjectConfig = {}
 ): Promise<{ graph: HistoryGraph; urls: LaneUrls; input: GraphInput }> {
   progress({ step: 'Reading working copy…', done: 0, total: 0 })
   const [info, root] = await Promise.all([svn.info(run, cwd), svn.reposRoot(run, cwd)])
+  const scope = await projectScope(run, cwd, root, info.relativeUrl, config)
+  if (scope) return loadProjectHistory(run, cwd, root, info.relativeUrl.replace(/^\^/, '') || '/', scope, progress, partial)
   const layout = parseLayout(info.relativeUrl)
   const current = info.relativeUrl.replace(/^\^/, '') || '/'
   const urlOf = (path: string) => root.replace(/\/+$/, '') + path
@@ -223,6 +227,91 @@ export async function loadHistory(
         const path = `${layout.prefix}/tags/${t.name}${layout.suffix}`
         try {
           return { name: t.name, path, entries: await svn.log(run, cwd, urlOf(path), { limit: 1, verbose: true, stopOnCopy: true }) }
+        } catch {
+          return null
+        }
+      })
+    )
+  ).filter((t): t is TagInput => !!t)
+  progress({ step: 'Done', done: 3, total: 3 })
+  const { input, graph } = emit(lanes, tags, await merges)
+  return { graph, urls, input }
+}
+/** History scoped to one project of a multi-project repository: its trunk folder, its branches
+ *  (new and legacy layouts, or the configured branchesPath) and its tags. */
+async function loadProjectHistory(
+  run: svn.SvnRunner,
+  cwd: string,
+  root: string,
+  current: string,
+  scope: Scope,
+  progress: Progress,
+  partial: Partial
+): Promise<{ graph: HistoryGraph; urls: LaneUrls; input: GraphInput }> {
+  const { loc, known } = scope
+  const urlOf = (path: string) => root.replace(/\/+$/, '') + path
+  const opts = { limit: LIMITS.revisionsPerLane, verbose: true, stopOnCopy: true }
+  const urls: LaneUrls = new Map()
+  const laneLog = async (id: string, name: string, kind: 'trunk' | 'branch', path: string, withFirst = false): Promise<LaneInput | null> => {
+    try {
+      const [entries, firstPage] = await Promise.all([
+        svn.log(run, cwd, urlOf(path), opts),
+        withFirst ? svn.log(run, cwd, urlOf(path), { limit: 1, verbose: true, stopOnCopy: true, oldestFirst: true }).catch(() => []) : Promise.resolve([])
+      ])
+      urls.set(id, urlOf(path))
+      const more = entries.length === LIMITS.revisionsPerLane
+      const first = more ? firstPage[0] : undefined
+      return { id, name, kind, path, entries, more, ...(first ? { first } : {}) }
+    } catch {
+      return null
+    }
+  }
+  const emit = (lanes: (LaneInput | null)[], tags: TagInput[], mergeinfo: string) => {
+    const input = { lanes: lanes.filter((l): l is LaneInput => !!l), current, tags, mergeinfo, standard: true }
+    return { input, graph: withMore(input) }
+  }
+  /** Drops lanes that were copied from another project (or from all of /trunk). */
+  const ours = (l: LaneInput | null) => {
+    const o = l ? laneOrigin(l) : null
+    return !o || detectProject(o.path, known)?.project === loc.project
+  }
+  const merges = svn.propget(run, cwd, 'svn:mergeinfo', urlOf(current)).catch(() => '')
+  const tagDirs = Promise.all([
+    svn.list(run, cwd, urlOf(`${loc.prefix}/tags`)).catch(() => [] as svn.ListEntry[]),
+    svn.list(run, cwd, urlOf(`${loc.prefix}/tags/${loc.project}`)).catch(() => [] as svn.ListEntry[])
+  ])
+
+  progress({ step: 'Reading trunk and this branch…', done: 0, total: 3 })
+  const ownPath = loc.line === 'branch' ? loc.path : null
+  const [trunk, own] = await Promise.all([
+    laneLog('trunk', 'trunk', 'trunk', scope.trunkPath),
+    ownPath ? laneLog(`b:${loc.name}`, loc.name, 'branch', ownPath, true) : Promise.resolve(null)
+  ])
+  partial(emit([trunk, own], [], '').graph)
+
+  progress({ step: 'Reading branches…', done: 1, total: 3 })
+  const others = scope.branches.filter((b) => b.path !== ownPath).slice(0, LIMITS.branches - (own ? 1 : 0))
+  const otherLanes = (await Promise.all(others.map((b) => laneLog(`b:${b.name}`, b.name, 'branch', b.path)))).filter(ours)
+  const lanes = [trunk, own, ...otherLanes]
+  partial(emit(lanes, [], '').graph)
+
+  progress({ step: 'Reading tags and merges…', done: 2, total: 3 })
+  const [flatTags, nestedTags] = await tagDirs
+  const tagRefs = [
+    ...nestedTags.filter((e) => e.kind === 'dir').map((e) => ({ name: e.name, path: `${loc.prefix}/tags/${loc.project}/${e.name}`, revision: e.revision })),
+    ...flatTags
+      .filter((e) => e.kind === 'dir' && e.name !== loc.project && detectProject(`${loc.prefix}/tags/${e.name}`, known)?.project === loc.project)
+      .map((e) => ({ name: e.name, path: `${loc.prefix}/tags/${e.name}`, revision: e.revision })),
+    // Tags of all of /trunk that no project owns by name: their <project> subfolder, if present.
+    ...flatTags
+      .filter((e) => e.kind === 'dir' && !known.includes(e.name) && detectProject(`${loc.prefix}/tags/${e.name}`, known)?.project == null)
+      .map((e) => ({ name: e.name, path: `${loc.prefix}/tags/${e.name}/${loc.project}`, revision: e.revision }))
+  ].sort((a, b) => (b.revision ?? 0) - (a.revision ?? 0))
+  const tags = (
+    await Promise.all(
+      tagRefs.slice(0, LIMITS.tags).map(async (t): Promise<TagInput | null> => {
+        try {
+          return { name: t.name, path: t.path, entries: await svn.log(run, cwd, urlOf(t.path), { limit: 1, verbose: true, stopOnCopy: true }) }
         } catch {
           return null
         }

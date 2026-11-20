@@ -54,7 +54,7 @@
   .more { padding: 10px 12px; }
   /* Loading */
   #loader { margin: 0 12px 6px; font-size: 11px; color: var(--orca-muted-foreground, #737373); }
-  #loader[hidden] { display: none; }
+  #loader[hidden], #nbform[hidden] { display: none !important; }
   .lrow { display: flex; align-items: center; gap: 8px; }
   .spin { width: 12px; height: 12px; border-radius: 50%; border: 2px solid var(--orca-border, #ccc); border-top-color: var(--orca-primary, #2563eb); animation: spin .8s linear infinite; flex: none; }
   @keyframes spin { to { transform: rotate(360deg); } }
@@ -75,8 +75,16 @@
 <body>
 <header>
   <div><b>History</b> <span id="where" class="muted xs"></span></div>
-  <button class="icon" id="refresh" title="Refresh history" aria-label="Refresh history">⟳</button>
+  <div>
+    <button class="icon" id="newbranch" title="New branch from this project's trunk" aria-label="New branch">＋</button>
+    <button class="icon" id="refresh" title="Refresh history" aria-label="Refresh history">⟳</button>
+  </div>
 </header>
+<form id="nbform" hidden style="display:flex;gap:4px;margin:4px 0">
+  <input id="nbname" placeholder="new branch name" aria-label="New branch name" style="flex:1;min-width:0" />
+  <button type="submit">Create</button>
+  <button type="button" id="nbcancel">Cancel</button>
+</form>
 <div id="notice"></div>
 <div id="legend" class="legend"></div>
 <div id="loader" hidden role="status" aria-live="polite">
@@ -134,6 +142,26 @@
     $('lstep').textContent = p.total ? `${p.step} (${p.done}/${p.total})` : p.step
     const bar = $('lbar')
     if (p.total) { bar.classList.remove('indet'); bar.firstElementChild.style.width = Math.round((p.done / p.total) * 100) + '%' }
+  })
+
+  $('newbranch').addEventListener('click', () => { $('nbform').hidden = !$('nbform').hidden; if (!$('nbform').hidden) $('nbname').focus() })
+  $('nbcancel').addEventListener('click', () => { $('nbform').hidden = true })
+  $('nbform').addEventListener('submit', async (ev) => {
+    ev.preventDefault()
+    const name = $('nbname').value.trim()
+    if (!name) return
+    const b = $('nbform').querySelector('button[type=submit]')
+    b.disabled = true
+    try {
+      const r = await orca.plugin.request('svn.branchCreate', { name })
+      $('nbform').hidden = true; $('nbname').value = ''
+      await load()
+      notice(r.message)
+    } catch (e) {
+      notice(errText(e), true)
+    } finally {
+      b.disabled = false
+    }
   })
 
   async function load() {
@@ -305,6 +333,11 @@
     if (kind === 'copy') return copyText(`r${sel.revision}`, btn)
     // Switch changes the working copy: the first click asks, the second runs.
     if (kind === 'switch' && !btn.dataset.armed) {
+      // The worker's guard: cross-project targets and edited secret files block; other changes warn.
+      let check
+      try { check = await orca.plugin.request('svn.switchCheck', { lane: sel.lane }) } catch (e) { return notice(errText(e), true) }
+      if (check.block) return notice(check.block, true)
+      if (check.warning) notice(check.warning + ' Click again to switch anyway.', true)
       btn.dataset.armed = '1'
       btn.dataset.label = btn.textContent
       btn.textContent = `Confirm switch to ${lane.name}`

@@ -1,10 +1,11 @@
 // The plugin's worker: reads SVN state for the focused workspace and runs svn actions.
 import type { OrcaWorkerApi } from 'orca/worker'
-import type { ActionResult, SvnState } from './protocol'
+import type { ActionResult, SvnInfo, SvnState } from './protocol'
 import { isAbsolute, relative } from 'node:path'
 import * as svn from './svn'
 import { loadHistory, loadMore, type GraphInput, type LaneUrls } from './history'
 import { watchFolder, type FolderWatch } from './watch'
+import * as project from './project'
 
 /** Injection points and timings; tests change them. */
 export const options: { runner: svn.SvnRunner; watchDelayMs: number; statusTimeoutMs: number } = {
@@ -57,6 +58,34 @@ export function forgetHeads(): void {
   heads.clear()
 }
 
+/** Repository root URL from `svn info` (url minus the ^/ relative part). */
+export function rootOf(info: { url: string; relativeUrl: string }): string {
+  const rel = info.relativeUrl.replace(/^\^/, '')
+  return rel && rel !== '/' && info.url.endsWith(rel) ? info.url.slice(0, info.url.length - rel.length) : info.url
+}
+
+/** ^/trunk children per repository root, cached so state reads stay cheap. */
+const projectLists = new Map<string, { at: number; list: string[] }>()
+export const PROJECTS_TTL_MS = 10 * 60_000
+async function projectsOf(cwd: string, root: string, prefix: string): Promise<string[]> {
+  const key = root + prefix
+  const hit = projectLists.get(key)
+  if (hit && Date.now() - hit.at < PROJECTS_TTL_MS) return hit.list
+  const list = await project.knownProjects(options.runner, cwd, root, prefix)
+  projectLists.set(key, { at: Date.now(), list })
+  return list
+}
+export function forgetProjects(): void {
+  projectLists.clear()
+}
+
+async function whereOf(cwd: string, info: SvnInfo): Promise<SvnState['where']> {
+  const guess = project.detectProject(info.relativeUrl)
+  if (!guess) return undefined
+  const loc = project.detectProject(info.relativeUrl, await projectsOf(cwd, rootOf(info), guess.prefix)) ?? guess
+  return { project: loc.project, line: loc.name }
+}
+
 export async function readState(orca: OrcaWorkerApi): Promise<SvnState> {
   let workspace: string | undefined
   try {
@@ -66,9 +95,9 @@ export async function readState(orca: OrcaWorkerApi): Promise<SvnState> {
     if (isRemote(ws)) return { status: 'remote', workspace, files: [] }
     const info = await svn.info(options.runner, ws.path)
     const files = await svn.status(options.runner, ws.path, options.statusTimeoutMs)
-    const head = await headOf(ws.path, info.url)
+    const [head, where] = await Promise.all([headOf(ws.path, info.url), whereOf(ws.path, info)])
     const rev = info.revision ?? 0
-    return { status: 'ok', workspace, info, files, ...(head != null && rev < head ? { behind: { head } } : {}) }
+    return { status: 'ok', workspace, info, files, ...(where ? { where } : {}), ...(head != null && rev < head ? { behind: { head } } : {}) }
   } catch (err) {
     if (err instanceof svn.SvnError && err.kind === 'not-wc') return { status: 'not-wc', workspace, files: [] }
     if (err instanceof svn.SvnError && err.kind === 'missing') return { status: 'svn-missing', workspace, files: [], error: err.message }
@@ -262,7 +291,8 @@ export default function activate(orca: OrcaWorkerApi): void {
         options.runner,
         ws.path,
         (p) => orca.panels.post('svn.historyProgress', p),
-        (g) => orca.panels.post('svn.historyPartial', g)
+        (g) => orca.panels.post('svn.historyPartial', g),
+        await configOf(ws.path)
       )
       laneUrls = urls
       historyInput = { path: ws.path, input }
@@ -304,8 +334,57 @@ export default function activate(orca: OrcaWorkerApi): void {
       return openDiffTab(ws, info.root, name, header + (text || '# No content changes (properties or copies only).\n'))
     })
   })
+  /** Per-working-copy config (.orca-svn.json in the workspace or .svn/orca-svn.json in the WC root). */
+  async function configOf(path: string): Promise<project.ProjectConfig> {
+    let wcRoot: string | undefined
+    try {
+      wcRoot = (await svn.info(options.runner, path)).root
+    } catch {
+      wcRoot = undefined
+    }
+    return project.readConfig([path, wcRoot])
+  }
+
+  /** The switch guard: same project only, no secret-file edits, warn on other local changes. */
+  const guardSwitch = async (path: string, url: string): Promise<project.SwitchCheck> => {
+    const info = await svn.info(options.runner, path)
+    const root = rootOf(info)
+    if (!url.startsWith(root)) return { block: 'Switch blocked: the target is in another repository.' }
+    const target = url.slice(root.length) || '/'
+    const here = project.detectProject(info.relativeUrl)
+    if (here) {
+      const known = await projectsOf(path, root, here.prefix)
+      const loc = project.detectProject(info.relativeUrl, known)
+      if (loc?.project) {
+        const block = project.checkProject(loc.project, target, await project.copySource(options.runner, path, root, target), known)
+        if (block) return { block }
+      }
+    }
+    return project.checkLocalChanges(await svn.status(options.runner, path, options.statusTimeoutMs))
+  }
+  orca.panels.handle('svn.switchCheck', async ({ lane }) => {
+    const ws = await local()
+    const url = laneUrl(lane)
+    return svnInvalid(() => guardSwitch(ws.path, url))
+  })
+  orca.panels.handle('svn.branchCreate', async ({ name, message }) => {
+    const ws = await local()
+    return svnInvalid(async () => {
+      const info = await svn.info(options.runner, ws.path)
+      const root = rootOf(info)
+      const scope = await project.projectScope(options.runner, ws.path, root, info.relativeUrl, await configOf(ws.path))
+      if (!scope) throw invalid('New branch needs a project working copy (^/trunk/<project> or one of its branches).')
+      const r = await project.createBranch(options.runner, ws.path, root, scope, name, message)
+      forgetHeads()
+      return { message: `Created ^${r.path}${r.revision != null ? ` at r${r.revision}` : ''} from ^${scope.trunkPath}.`, path: r.path, revision: r.revision }
+    })
+  })
+
   orca.panels.handle('svn.switch', async ({ lane }) => {
     const url = laneUrl(lane)
+    const pre = await local()
+    const check = await svnInvalid(() => guardSwitch(pre.path, url))
+    if (check.block) throw invalid(check.block)
     const { message, state } = await act((ws) => svn.switchTo(options.runner, ws.path, url), (r) => `Switched to ${lane.replace(/^b:/, '')}${r != null ? ` at r${r}` : ''}.`)
     return { message, state }
   })

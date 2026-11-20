@@ -373,6 +373,11 @@ export async function switchTo(run: SvnRunner, cwd: string, url: string): Promis
   return parseRevision(await svn(run, ['switch', url, '.'], cwd, LONG_TIMEOUT_MS))
 }
 
+/** Server-side `svn copy --parents FROM TO -F msgFile`; returns the new revision. */
+export async function copyUrl(run: SvnRunner, cwd: string, from: string, to: string, msgFile: string): Promise<number | null> {
+  return parseRevision(await svn(run, ['copy', '--parents', '-F', msgFile, '--encoding', 'utf-8', from, to], cwd, LONG_TIMEOUT_MS))
+}
+
 /** Folder for diffs opened in editor tabs: inside .svn, so svn and the watcher ignore it. */
 export const DIFF_DIR = join('.svn', 'orca-diffs')
 /** Used when the workspace is a subfolder of the working copy (its .svn is outside the workspace). */

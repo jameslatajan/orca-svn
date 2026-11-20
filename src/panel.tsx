@@ -76,6 +76,12 @@ export function branchName(relativeUrl: string | undefined): string | null {
   return parts.length ? parts[parts.length - 1] : null
 }
 
+/** "clinicsys · trunk" in a multi-project repository, otherwise the branch name. */
+export function headerTitle(s: SvnState): string | null {
+  if (s.where?.project) return `${s.where.project} · ${s.where.line}`
+  return branchName(s.info?.relativeUrl)
+}
+
 function receive(s: SvnState): void {
   set(state, s)
   // Drop ticks for files that are no longer changed.
@@ -219,7 +225,7 @@ function Header(props: { s: SvnState }) {
   const b = read(busy)
   const info = props.s.info
   const ok = props.s.status === 'ok'
-  const branch = branchName(info?.relativeUrl)
+  const branch = headerTitle(props.s)
   const tool = (name: string, label: string, icon: 'download' | 'file' | 'refresh', onPress: () => unknown) =>
     b === name ? <Spinner label={`${label}…`} labelHidden /> : <IconButton icon={icon} label={label} size="sm" variant="ghost" disabled={!!b} onPress={onPress} />
   const where = info ? [props.s.workspace, info.relativeUrl || info.url].filter(Boolean).join(' · ') : null
