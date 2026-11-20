@@ -43,6 +43,8 @@ const branches = atom<BranchTarget[] | null>(null)
 const branchChoice = atom('')
 /** Set once the guard passed: the warning to confirm (or '' for none). */
 const switchArmed = atom<string | null>(null)
+/** Why the last switch was blocked or failed, shown under the switcher. */
+const switchError = atom<string | null>(null)
 
 /** Case-insensitive substring match on the path; empty query matches everything. */
 export function matches(f: SvnFile, q: string): boolean {
@@ -143,21 +145,31 @@ const loadBranches = () =>
     set(branches, targets)
     set(branchChoice, targets.find((t) => !t.current)?.id ?? '')
     set(switchArmed, null)
+    set(switchError, null)
   })
 /** First press runs the guard (blocks or arms with a warning); the second press switches. */
 async function switchBranch(): Promise<void> {
   const lane = read(branchChoice)
-  if (read(switchArmed) == null) {
-    await run('switch', async () => {
+  set(switchError, null)
+  const fail = (err: unknown) => set(switchError, err instanceof Error ? err.message : String(err))
+  set(busy, 'switch')
+  try {
+    if (read(switchArmed) == null) {
       const check = await plugin.request('svn.switchCheck', { lane })
-      if (check.block) throw new Error(check.block)
+      if (check.block) return fail(new Error(check.block))
       set(switchArmed, check.warning ?? '')
-    })
-    return
+      return
+    }
+    set(switchArmed, null)
+    const r = await plugin.request('svn.switch', { lane })
+    receive(r.state)
+    set(notice, { tone: 'success', text: r.message })
+    set(branches, null)
+  } catch (err) {
+    fail(err)
+  } finally {
+    set(busy, null)
   }
-  set(switchArmed, null)
-  const ok = await run('switch', () => plugin.request('svn.switch', { lane }))
-  if (ok) set(branches, null)
 }
 async function commit(): Promise<void> {
   const files = read(checked)
@@ -295,14 +307,16 @@ function Branches() {
         onChange={(v) => {
           set(branchChoice, v)
           set(switchArmed, null)
+          set(switchError, null)
         }}
       />
-      {armed ? <Callout tone="warning">{armed}</Callout> : null}
+      {armed ? <Callout tone="warning" title="Check before switching">{armed}</Callout> : null}
+      {read(switchError) ? <Callout tone="danger" title="Switch blocked">{read(switchError)}</Callout> : null}
       <Grid columns={2} gap="xs">
         <Button size="sm" variant={armed != null ? 'solid' : 'outline'} tone={armed != null ? 'danger' : undefined} icon="branch" disabled={!!b || !target || target.current} onPress={switchBranch}>
           {b === 'switch' ? 'Switching…' : armed != null ? 'Confirm' : 'Switch'}
         </Button>
-        <Button size="sm" variant="outline" onPress={() => set(branches, null)}>
+        <Button size="sm" variant="outline" onPress={() => { set(branches, null); set(switchError, null) }}>
           Cancel
         </Button>
       </Grid>
