@@ -19,10 +19,22 @@ export class SvnError extends Error {
   }
 }
 
+/** GUI apps on macOS/Linux get launchd's minimal PATH (no Homebrew/MacPorts), so `svn` from a
+ *  terminal can be invisible to Orca. Fall back to the usual install locations. */
+const SVN_FALLBACKS = ['/opt/homebrew/bin/svn', '/usr/local/bin/svn', '/opt/local/bin/svn', '/usr/bin/svn']
+let svnBin: string | undefined
+function svnPath(): string {
+  if (svnBin) return svnBin
+  if (process.platform === 'win32') return (svnBin = 'svn')
+  const dirs = (process.env.PATH ?? '').split(':').filter(Boolean)
+  const onPath = dirs.map((d) => join(d, 'svn')).find((p) => existsSync(p))
+  return (svnBin = onPath ?? SVN_FALLBACKS.find((p) => existsSync(p)) ?? 'svn')
+}
+
 export const defaultRunner: SvnRunner = (args, cwd, timeoutMs) =>
   new Promise((done, fail) => {
     execFile(
-      'svn',
+      svnPath(),
       args,
       { cwd, timeout: timeoutMs, maxBuffer: 64 * 1024 * 1024, windowsHide: true, encoding: 'utf8' },
       (err, stdout, stderr) => {

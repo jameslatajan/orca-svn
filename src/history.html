@@ -436,7 +436,12 @@
     workspace = s.workspace
     selected = null
     if (s.status === 'ok') load()
-    else { graph = null; render(); $('detail').innerHTML = ''; notice(s.status === 'no-workspace' ? 'Focus a workspace to see its history.' : 'This workspace is not an SVN working copy.') }
+    else { graph = null; render(); $('detail').innerHTML = ''; notice(
+      s.status === 'no-workspace' ? 'Focus a workspace to see its history.'
+      : s.status === 'not-wc' ? 'This workspace is not an SVN working copy.'
+      : s.status === 'remote' ? 'History is not available for remote workspaces.'
+      : s.error || 'Could not read SVN state.',
+      s.status === 'error' || s.status === 'svn-missing') }
   }
   orca.on('svn.changed', onState)
   orca.plugin.request('svn.state').then(onState, (e) => notice(errText(e), true))
