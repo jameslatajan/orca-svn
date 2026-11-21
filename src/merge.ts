@@ -53,12 +53,17 @@ export function changedFiles(entries: readonly svn.LogEntry[], base: string): Me
   return [...seen].map(([path, change]) => ({ path, change })).sort((a, b) => a.path.localeCompare(b.path))
 }
 
-/** Why Accept cannot run in this working copy, or null when it can. */
-export function checkTarget(wcUrl: string, targetUrl: string, files: readonly SvnFile[]): string | null {
+/** Local changes that stop Accept (unversioned files do not). */
+export function blockingFiles(files: readonly SvnFile[]): SvnFile[] {
+  return files.filter((f) => f.status !== 'unversioned')
+}
+
+/** Why Accept cannot run in this working copy (and which files block it), or null when it can. */
+export function checkTarget(wcUrl: string, targetUrl: string, files: readonly SvnFile[]): { block: string; blockers: SvnFile[] } | null {
   const norm = (u: string) => u.replace(/\/+$/, '')
-  if (norm(wcUrl) !== norm(targetUrl)) return 'Accept merges into trunk: switch this working copy to trunk first.'
-  const dirty = files.filter((f) => f.status !== 'unversioned')
-  if (dirty.length) return `Commit or revert local changes first (${dirty.length} changed).`
+  if (norm(wcUrl) !== norm(targetUrl)) return { block: 'Accept merges into trunk: switch this working copy to trunk first.', blockers: [] }
+  const dirty = blockingFiles(files)
+  if (dirty.length) return { block: `Commit or revert local changes first (${dirty.length} changed).`, blockers: dirty }
   return null
 }
 

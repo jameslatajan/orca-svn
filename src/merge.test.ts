@@ -1,5 +1,5 @@
 import { execFileSync } from 'node:child_process'
-import { appendFileSync, mkdirSync, mkdtempSync, writeFileSync } from 'node:fs'
+import { appendFileSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { pathToFileURL } from 'node:url'
@@ -37,8 +37,17 @@ test('changedFiles: relative to the branch, newest action wins, dirs skipped', (
 })
 
 test('checkTarget: trunk only, clean only', () => {
-  assert.match(merge.checkTarget('file:///r/branches/p/x', 'file:///r/trunk/p', []) ?? '', /switch this working copy to trunk/)
-  assert.match(merge.checkTarget('file:///r/trunk/p', 'file:///r/trunk/p/', [{ path: 'a', status: 'modified' }]) ?? '', /Commit or revert/)
+  assert.match(merge.checkTarget('file:///r/branches/p/x', 'file:///r/trunk/p', [])?.block ?? '', /switch this working copy to trunk/)
+  const c = merge.checkTarget('file:///r/trunk/p', 'file:///r/trunk/p/', [
+    { path: 'a', status: 'modified' },
+    { path: 'n', status: 'unversioned' },
+    { path: 'g', status: 'missing' }
+  ])
+  assert.match(c?.block ?? '', /Commit or revert local changes first \(2 changed\)/)
+  assert.deepEqual(c?.blockers, [
+    { path: 'a', status: 'modified' },
+    { path: 'g', status: 'missing' }
+  ])
   assert.equal(merge.checkTarget('file:///r/trunk/p', 'file:///r/trunk/p', [{ path: 'n', status: 'unversioned' }]), null)
 })
 
@@ -77,7 +86,14 @@ function host(path: string) {
   })
 }
 
-type MR = { source: string; target: string; commits: { revision: number; message: string }[]; files: { path: string; change: string }[]; block?: string }
+type MR = {
+  source: string
+  target: string
+  commits: { revision: number; message: string }[]
+  files: { path: string; change: string }[]
+  block?: string
+  blockers?: { path: string; status: string }[]
+}
 
 test('worker: review a branch, accept merges into trunk without committing', { skip: !hasSvn() }, async () => {
   const { wc, bwc } = featureRepo()
@@ -93,6 +109,7 @@ test('worker: review a branch, accept merges into trunk without committing', { s
     { path: 'b.txt', change: 'added' }
   ])
   assert.equal(mr.block, undefined)
+  assert.equal(mr.blockers, undefined)
 
   const d = (await worker.request('svn.mergeDiff', { lane: 'b:feature' })) as { path: string }
   assert.ok(d.path.endsWith('merge-feature.svndiff'))

@@ -134,3 +134,103 @@ test('merge request: review a branch, accept prefills the commit form', async ()
   assert.ok(view.find({ text: 'Commit 3 files' }))
   await view.unmount()
 })
+
+test('merge request: lists blocking files; revert and commit them, then Accept unlocks', async () => {
+  const reviews: unknown[] = []
+  const reverts: unknown[] = []
+  const diffs: unknown[] = []
+  let blockers = [
+    { path: 'a.txt', status: 'modified' as const },
+    { path: 'gone.txt', status: 'missing' as const },
+    { path: 'b.txt', status: 'added' as const }
+  ]
+  const local: SvnState = { ...clean, files: [...blockers, { path: 'n.txt', status: 'unversioned' }] }
+  const host = mockHost({
+    requests: {
+      'svn.state': local,
+      'svn.branches': { targets: [{ id: 'b:feature', name: 'feature', current: false }] },
+      'svn.mergeRequest': (input) => (
+        reviews.push(input),
+        {
+          lane: 'b:feature',
+          source: '^/branches/app/feature',
+          target: '^/trunk/app',
+          commits: [{ revision: 4, author: 'jo', date: '', message: 'add b' }],
+          files: [],
+          ...(blockers.length ? { block: `Commit or revert local changes first (${blockers.length} changed).`, blockers } : {})
+        }
+      ),
+      'svn.diff': (input) => (diffs.push(input), { path: 'x.svndiff' }),
+      'svn.revert': (input: { files: string[] }) => {
+        reverts.push(input)
+        blockers = blockers.filter((f) => !input.files.includes(f.path))
+        return { message: 'Reverted.', state: { ...clean, files: blockers } }
+      },
+      'svn.commit': (input: { files: string[] }) => {
+        blockers = blockers.filter((f) => !input.files.includes(f.path))
+        return { message: 'Committed revision 7.', state: { ...clean, files: blockers }, revision: 7 }
+      }
+    }
+  })
+  const view = await mount(panel, { host })
+  await view.press({ text: 'Merge request…' })
+  await view.press({ text: 'Review' })
+  assert.ok(view.find({ text: 'Blocking files · 3' }))
+  assert.ok(view.find({ label: 'Open diff a.txt' }))
+  assert.ok(!view.find({ label: 'Open diff gone.txt' }))
+  assert.ok(!view.find({ label: 'Revert blocker n.txt' }))
+  await view.press({ label: 'Open diff a.txt' })
+  assert.deepEqual(diffs, [{ file: 'a.txt' }])
+
+  // Per-file revert asks first.
+  await view.press({ label: 'Revert blocker gone.txt' })
+  assert.deepEqual(reverts, [])
+  await view.press({ text: 'Confirm revert gone.txt' })
+  assert.deepEqual(reverts, [{ files: ['gone.txt'] }])
+  assert.ok(view.find({ text: 'Blocking files · 2' }))
+
+  // Commit these first ticks them in the normal commit form.
+  await view.press({ text: 'Commit these first' })
+  assert.ok(view.find({ text: 'Commit 2 files' }))
+  await view.type({ label: 'Commit message' }, 'wip')
+  await view.press({ text: 'Commit 2 files' })
+  assert.equal(reviews.length, 3)
+  assert.ok(!view.find({ text: 'Blocking files · 2' }))
+  const accept = view.find({ text: 'Accept merge' }) as { props?: { disabled?: boolean } } | null
+  assert.ok(accept)
+  assert.ok(!accept?.props?.disabled)
+  await view.unmount()
+})
+
+test('merge request: revert all needs confirmation', async () => {
+  const reverts: unknown[] = []
+  let blockers = [
+    { path: 'a.txt', status: 'modified' as const },
+    { path: 'c.txt', status: 'conflicted' as const }
+  ]
+  const host = mockHost({
+    requests: {
+      'svn.state': { ...clean, files: blockers },
+      'svn.branches': { targets: [{ id: 'b:feature', name: 'feature', current: false }] },
+      'svn.mergeRequest': () => ({
+        lane: 'b:feature',
+        source: '^/branches/app/feature',
+        target: '^/trunk/app',
+        commits: [{ revision: 4, author: 'jo', date: '', message: 'add b' }],
+        files: [],
+        ...(blockers.length ? { block: `Commit or revert local changes first (${blockers.length} changed).`, blockers } : {})
+      }),
+      'svn.revert': (input: { files: string[] }) => (reverts.push(input), (blockers = []), { message: 'Reverted 2 files.', state: clean })
+    }
+  })
+  const view = await mount(panel, { host })
+  await view.press({ text: 'Merge request…' })
+  await view.press({ text: 'Review' })
+  await view.press({ text: 'Revert all' })
+  assert.deepEqual(reverts, [])
+  await view.press({ text: 'Confirm revert all 2' })
+  assert.deepEqual(reverts, [{ files: ['a.txt', 'c.txt'] }])
+  assert.ok(!view.find({ text: 'Blocking files · 2' }))
+  assert.ok(!view.find({ text: 'Cannot accept here' }) && !view.find({ label: 'Cannot accept here' }))
+  await view.unmount()
+})
