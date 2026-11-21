@@ -6,6 +6,7 @@ import * as svn from './svn'
 import { loadHistory, parseLayout, loadMore, type GraphInput, type LaneUrls } from './history'
 import { watchFolder, type FolderWatch } from './watch'
 import * as project from './project'
+import * as merge from './merge'
 
 /** Injection points and timings; tests change them. */
 export const options: { runner: svn.SvnRunner; watchDelayMs: number; statusTimeoutMs: number } = {
@@ -384,28 +385,84 @@ export default function activate(orca: OrcaWorkerApi): void {
 
   orca.panels.handle('svn.branches', async () => {
     const ws = await local()
-    return svnInvalid(async () => {
-      const info = await svn.info(options.runner, ws.path)
-      const root = rootOf(info)
-      const current = '/' + info.relativeUrl.replace(/^\^/, '').split('/').filter(Boolean).join('/')
-      const urlOf = (p: string) => root.replace(/\/+$/, '') + p
-      const lines: { id: string; name: string; path: string }[] = []
-      const scope = await project.projectScope(options.runner, ws.path, root, info.relativeUrl, await configOf(ws.path))
-      if (scope) {
-        lines.push({ id: 'trunk', name: 'trunk', path: scope.trunkPath })
-        for (const b of [...scope.branches].sort((x, y) => x.name.localeCompare(y.name))) lines.push({ id: `b:${b.name}`, name: b.name, path: b.path })
-      } else {
-        const layout = parseLayout(info.relativeUrl)
-        if (layout) {
-          lines.push({ id: 'trunk', name: 'trunk', path: `${layout.prefix}/trunk${layout.suffix}` })
-          const ls = await svn.list(options.runner, ws.path, urlOf(`${layout.prefix}/branches`)).catch(() => [])
-          for (const e of ls.filter((e) => e.kind === 'dir').sort((x, y) => x.name.localeCompare(y.name)))
-            lines.push({ id: `b:${e.name}`, name: e.name, path: `${layout.prefix}/branches/${e.name}${layout.suffix}` })
-        }
+    return svnInvalid(() => listBranches(ws.path))
+  })
+  /** Fills branchUrls with this project's trunk and branches and returns the switcher targets. */
+  async function listBranches(path: string) {
+    const info = await svn.info(options.runner, path)
+    const root = rootOf(info)
+    const current = '/' + info.relativeUrl.replace(/^\^/, '').split('/').filter(Boolean).join('/')
+    const urlOf = (p: string) => root.replace(/\/+$/, '') + p
+    const lines: { id: string; name: string; path: string }[] = []
+    const scope = await project.projectScope(options.runner, path, root, info.relativeUrl, await configOf(path))
+    if (scope) {
+      lines.push({ id: 'trunk', name: 'trunk', path: scope.trunkPath })
+      for (const b of [...scope.branches].sort((x, y) => x.name.localeCompare(y.name))) lines.push({ id: `b:${b.name}`, name: b.name, path: b.path })
+    } else {
+      const layout = parseLayout(info.relativeUrl)
+      if (layout) {
+        lines.push({ id: 'trunk', name: 'trunk', path: `${layout.prefix}/trunk${layout.suffix}` })
+        const ls = await svn.list(options.runner, path, urlOf(`${layout.prefix}/branches`)).catch(() => [])
+        for (const e of ls.filter((e) => e.kind === 'dir').sort((x, y) => x.name.localeCompare(y.name)))
+          lines.push({ id: `b:${e.name}`, name: e.name, path: `${layout.prefix}/branches/${e.name}${layout.suffix}` })
       }
-      branchUrls = new Map(lines.map((l) => [l.id, urlOf(l.path)]))
-      return { targets: lines.map((l) => ({ id: l.id, name: l.name, current: l.path === current })) }
+    }
+    branchUrls = new Map(lines.map((l) => [l.id, urlOf(l.path)]))
+    return { targets: lines.map((l) => ({ id: l.id, name: l.name, current: l.path === current })) }
+  }
+
+  // ---------- Merge requests ----------
+  /** Branch lane and its trunk as URLs and ^/ paths; loads the branch list when needed. */
+  const mergePair = async (path: string, lane: string) => {
+    if (typeof lane !== 'string' || !lane.startsWith('b:')) throw invalid('Pick a branch to review.')
+    if (!branchUrls.has(lane) || !branchUrls.has('trunk')) await listBranches(path)
+    const source = branchUrls.get(lane)
+    const target = branchUrls.get('trunk')
+    if (!source || !target) throw invalid('Unknown branch; reload the branches.')
+    const info = await svn.info(options.runner, path)
+    const root = rootOf(info).replace(/\/+$/, '')
+    const rel = (u: string) => (u.startsWith(root) ? u.slice(root.length) || '/' : u)
+    return { source, target, info, sourcePath: rel(source), targetPath: rel(target) }
+  }
+  orca.panels.handle('svn.mergeRequest', async ({ lane }) => {
+    const ws = await local()
+    return svnInvalid(async () => {
+      const p = await mergePair(ws.path, lane)
+      const { commits, files } = await merge.pending(options.runner, ws.path, p.source, p.sourcePath, p.target)
+      const block = merge.checkTarget(p.info.url, p.target, await svn.status(options.runner, ws.path, options.statusTimeoutMs))
+      return { lane, source: `^${p.sourcePath}`, target: `^${p.targetPath}`, commits, files, ...(block ? { block } : {}) }
     })
+  })
+  orca.panels.handle('svn.mergeDiff', async ({ lane }) => {
+    const ws = await local()
+    return svnInvalid(async () => {
+      const p = await mergePair(ws.path, lane)
+      const out = await svn.svn(options.runner, ['diff', `--old=${p.target}`, `--new=${p.source}`], ws.path, svn.LONG_TIMEOUT_MS)
+      const max = 20_000_000
+      const header = `# ^${p.targetPath} -> ^${p.sourcePath}\n` + (out.length > max ? '# Cut off at 20 MB.\n' : '') + '\n'
+      const name = `merge-${lane.replace(/^b:/, '').replace(/[^\w.-]+/g, '_')}.svndiff`
+      return openDiffTab(ws, p.info.root, name, header + (out.slice(0, max) || '# No differences.\n'))
+    })
+  })
+  orca.panels.handle('svn.mergeAccept', async ({ lane }) => {
+    const pre = await local()
+    const p = await svnInvalid(() => mergePair(pre.path, lane))
+    const block = merge.checkTarget(p.info.url, p.target, await svnInvalid(() => svn.status(options.runner, pre.path, options.statusTimeoutMs)))
+    if (block) throw invalid(block)
+    const revs = await svnInvalid(() => merge.eligibleRevisions(options.runner, pre.path, p.source, p.target))
+    if (!revs.length) throw invalid('Nothing to merge: trunk already has every commit of this branch.')
+    const commitMessage = merge.mergeMessage(`^${p.sourcePath}`, `^${p.targetPath}`, revs)
+    const r = await act(
+      async (ws) => {
+        await svn.update(options.runner, ws.path)
+        return merge.mergeInto(options.runner, ws.path, p.source)
+      },
+      (m) =>
+        m.conflicts.length
+          ? `Merged with conflicts in ${m.conflicts.join(', ')}. Resolve them, then commit.`
+          : 'Merged into the working copy. Review the changes, then commit.'
+    )
+    return { message: r.message, state: r.state, conflicts: r.value?.conflicts ?? [], commitMessage }
   })
 
   orca.panels.handle('svn.switch', async ({ lane }) => {

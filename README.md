@@ -74,6 +74,23 @@ Diffs open in a full editor tab.
 
 <br clear="right">
 
+## Merge requests
+
+Review a branch and merge it into its trunk without typing `svn merge`:
+
+1. Check out (or switch to) the project's trunk, with no local changes.
+2. **Merge request…** → pick a branch → **Review** lists the commits trunk does not have yet
+   (`svn mergeinfo --show-revs eligible`) and the files they touch. **Open diff** shows trunk → branch in a diff tab.
+3. **Accept merge** updates the working copy and runs `svn merge ^/branches/... .`. Conflicts land in the
+   Conflicted list for **Resolve**.
+4. Nothing is committed for you: the commit form is filled with `Merge <branch> into <trunk> (rA-rB, N commits)`
+   and the merged files (including `.` for `svn:mergeinfo`) are ticked. Press **Commit** when satisfied, so any
+   commit guard (e.g. an agent guard waiting for owner approval) still applies.
+
+Branches come from the same project scoping as the switcher (`^/trunk/<p>` ↔ `^/branches/<p>/<name>`, legacy
+`^/branches/<p>-<name>`, `branchesPath` override, and plain `<prefix>/trunk` layouts). Merge requests are local;
+`MergeRequestRemote` in `src/merge.ts` is the seam for a future Assembla backend (not built).
+
 ## Requirements
 
 - **Orca** 1.4.259 or newer (`engines.orca` in `orca-plugin.json`; developed and tested on Orca 1.4.263).

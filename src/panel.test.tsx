@@ -100,3 +100,37 @@ test('empty states', async () => {
     await view.unmount()
   }
 })
+
+test('merge request: review a branch, accept prefills the commit form', async () => {
+  const calls: unknown[] = []
+  const merged: SvnState = { ...clean, files: [{ path: '.', status: 'modified' }, { path: 'a.txt', status: 'modified' }, { path: 'b.txt', status: 'added' }] }
+  const host = mockHost({
+    requests: {
+      'svn.state': clean,
+      'svn.branches': { targets: [{ id: 'trunk', name: 'trunk', current: true }, { id: 'b:feature', name: 'feature', current: false }] },
+      'svn.mergeRequest': (input) => (
+        calls.push(['review', input]),
+        {
+          lane: 'b:feature',
+          source: '^/branches/app/feature',
+          target: '^/trunk/app',
+          commits: [{ revision: 4, author: 'jo', date: '', message: 'add b' }],
+          files: [{ path: 'b.txt', change: 'added' }]
+        }
+      ),
+      'svn.mergeAccept': (input) => (
+        calls.push(['accept', input]),
+        { message: 'Merged into the working copy. Review the changes, then commit.', state: merged, conflicts: [], commitMessage: 'Merge ^/branches/app/feature into ^/trunk/app (r4)' }
+      )
+    }
+  })
+  const view = await mount(panel, { host })
+  await view.press({ text: 'Merge request…' })
+  await view.press({ text: 'Review' })
+  assert.ok(view.find({ text: 'r4 · jo · add b' }))
+  await view.press({ text: 'Accept merge' })
+  assert.deepEqual(calls, [['review', { lane: 'b:feature' }], ['accept', { lane: 'b:feature' }]])
+  assert.ok(view.find({ text: 'Merged into the working copy. Review the changes, then commit.' }))
+  assert.ok(view.find({ text: 'Commit 3 files' }))
+  await view.unmount()
+})
