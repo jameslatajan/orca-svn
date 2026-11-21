@@ -65,6 +65,22 @@ export type RevisionDetail = {
 /** A line the working copy can switch to; `id` is a lane id ("trunk" or "b:<name>"). */
 export type BranchTarget = { id: string; name: string; current: boolean }
 
+/** A commit on the branch that trunk does not have yet. */
+export type MergeCommit = { revision: number; author: string; date: string; message: string }
+/** A file those commits touch, relative to the branch root. */
+export type MergeFile = { path: string; change: 'added' | 'modified' | 'deleted' }
+/** A local merge request: a branch lane reviewed against its trunk. */
+export type MergeRequest = {
+  lane: string
+  /** Repository-relative paths, e.g. "^/branches/clinicsys/fix-login" and "^/trunk/clinicsys". */
+  source: string
+  target: string
+  commits: MergeCommit[]
+  files: MergeFile[]
+  /** Why Accept cannot run here (not on trunk, local changes), if anything. */
+  block?: string
+}
+
 declare module 'orca' {
   interface PluginRequests {
     /** SVN state of the focused workspace. */
@@ -97,6 +113,13 @@ declare module 'orca' {
     'svn.branches': { output: { targets: BranchTarget[] } }
     /** Ignores files: `git` appends to the workspace .gitignore, `svn` adds to the folder's svn:ignore. */
     'svn.ignore': { input: { files: string[]; target: 'git' | 'svn' }; output: ActionResult }
+    /** Reviews a branch lane (from svn.branches) against this project's trunk: unmerged commits and files. */
+    'svn.mergeRequest': { input: { lane: string }; output: MergeRequest }
+    /** Opens `svn diff` trunk -> branch in an SVN Diff editor tab. */
+    'svn.mergeDiff': { input: { lane: string }; output: { path: string } }
+    /** Accept: updates the clean trunk working copy and runs `svn merge <branch> .`. Never commits;
+     *  `commitMessage` prefills the normal commit form. */
+    'svn.mergeAccept': { input: { lane: string }; output: ActionResult & { conflicts: string[]; commitMessage: string } }
   }
   interface PluginPanelEvents {
     /** Fresh state after a workspace switch, file change, action or refresh. */

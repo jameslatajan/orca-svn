@@ -24,7 +24,7 @@ import {
   Textarea,
   type PanelContext
 } from 'orca'
-import type { ActionResult, BranchTarget, FileStatus, SvnFile, SvnState } from './protocol'
+import type { ActionResult, BranchTarget, FileStatus, MergeRequest, SvnFile, SvnState } from './protocol'
 
 const state = atom<SvnState | null>(null)
 const busy = atom<string | null>(null)
@@ -45,6 +45,12 @@ const branchChoice = atom('')
 const switchArmed = atom<string | null>(null)
 /** Why the last switch was blocked or failed, shown under the switcher. */
 const switchError = atom<string | null>(null)
+
+/** Merge request: branches to pick from (null = closed), the picked lane and its review. */
+const mergeTargets = atom<BranchTarget[] | null>(null)
+const mergeChoice = atom('')
+const mergeReview = atom<MergeRequest | null>(null)
+const mergeError = atom<string | null>(null)
 
 /** Case-insensitive substring match on the path; empty query matches everything. */
 export function matches(f: SvnFile, q: string): boolean {
@@ -324,6 +330,151 @@ function Branches() {
   )
 }
 
+/** Runs a merge-request step; errors show under the merge box. */
+async function mergeStep(label: string, fn: () => Promise<void>): Promise<void> {
+  set(busy, label)
+  set(mergeError, null)
+  try {
+    await fn()
+  } catch (err) {
+    set(mergeError, err instanceof Error ? err.message : String(err))
+  } finally {
+    set(busy, null)
+  }
+}
+const openMerge = () =>
+  mergeStep('mergeList', async () => {
+    const { targets } = await plugin.request('svn.branches')
+    const list = targets.filter((t) => t.id !== 'trunk')
+    set(mergeTargets, list)
+    set(mergeChoice, list[0]?.id ?? '')
+    set(mergeReview, null)
+  })
+const closeMerge = () => {
+  set(mergeTargets, null)
+  set(mergeReview, null)
+  set(mergeError, null)
+}
+const reviewMerge = () => mergeStep('mergeReview', async () => set(mergeReview, await plugin.request('svn.mergeRequest', { lane: read(mergeChoice) })))
+const mergeDiff = () => mergeStep('mergeDiff', async () => void (await plugin.request('svn.mergeDiff', { lane: read(mergeChoice) })))
+/** Accept: merge into the trunk working copy, then prefill the normal commit form (never commits). */
+const acceptMerge = () =>
+  mergeStep('mergeAccept', async () => {
+    const r = await plugin.request('svn.mergeAccept', { lane: read(mergeChoice) })
+    receive(r.state)
+    set(message, r.commitMessage)
+    set(checked, r.state.files.filter((f) => committable(f) && f.status !== 'unversioned' && !f.ignored).map((f) => f.path))
+    set(notice, { tone: r.conflicts.length ? 'danger' : 'success', text: r.message })
+    closeMerge()
+  })
+
+/** Local merge request: review a branch against its trunk and merge it into a trunk working copy. */
+function MergeRequests() {
+  const b = read(busy)
+  const list = read(mergeTargets)
+  const err = read(mergeError)
+  if (!list) {
+    return b === 'mergeList' ? (
+      <Spinner label="Loading branches…" />
+    ) : (
+      <Stack gap="xs" align="stretch">
+        <Button size="sm" variant="outline" icon="branch" disabled={!!b} onPress={openMerge}>
+          Merge request…
+        </Button>
+        {err ? <Callout tone="danger" title="Merge request">{err}</Callout> : null}
+      </Stack>
+    )
+  }
+  const mr = read(mergeReview)
+  const choice = read(mergeChoice)
+  return (
+    <Stack gap="xs" align="stretch">
+      {list.length ? (
+        <Select
+          label="Branch to merge into trunk"
+          value={choice}
+          disabled={!!b}
+          options={list.map((t) => ({ value: t.id, label: t.name }))}
+          onChange={(v) => {
+            set(mergeChoice, v)
+            set(mergeReview, null)
+            set(mergeError, null)
+          }}
+        />
+      ) : (
+        <Text muted size="xs">No branches for this project.</Text>
+      )}
+      {mr ? <MergeSummary mr={mr} /> : null}
+      {err ? <Callout tone="danger" title="Merge request">{err}</Callout> : null}
+      <Grid columns={2} gap="xs">
+        {mr ? (
+          <Button size="sm" variant="solid" tone="accent" icon="check" disabled={!!b || !!mr.block || !mr.commits.length} onPress={acceptMerge}>
+            {b === 'mergeAccept' ? 'Merging…' : 'Accept merge'}
+          </Button>
+        ) : (
+          <Button size="sm" variant="outline" icon="file-text" disabled={!!b || !choice} onPress={reviewMerge}>
+            {b === 'mergeReview' ? 'Loading…' : 'Review'}
+          </Button>
+        )}
+        <Button size="sm" variant="outline" onPress={closeMerge}>
+          Cancel
+        </Button>
+      </Grid>
+    </Stack>
+  )
+}
+
+function MergeSummary(props: { mr: MergeRequest }) {
+  const mr = props.mr
+  const b = read(busy)
+  const code = { added: 'A', modified: 'M', deleted: 'D' } as const
+  const tone = { added: 'success', modified: 'accent', deleted: 'danger' } as const
+  return (
+    <Stack gap="xs">
+      <Text muted size="xs" truncate>
+        {`${mr.source} → ${mr.target}`}
+      </Text>
+      {!mr.commits.length ? <Text size="sm">{'Nothing to merge: trunk has every commit of this branch.'}</Text> : null}
+      {mr.commits.length ? (
+        <Collapsible title={`Commits · ${mr.commits.length}`} defaultOpen={mr.commits.length <= 10}>
+          <Box direction="column" gap="xs" maxHeight={240} minWidth={0} scroll="y">
+            {mr.commits.map((c) => (
+              <Text size="xs" truncate>
+                {`r${c.revision} · ${c.author} · ${c.message.split(/\r?\n/)[0]}`}
+              </Text>
+            ))}
+          </Box>
+        </Collapsible>
+      ) : null}
+      {mr.files.length ? (
+        <Collapsible title={`Files · ${mr.files.length}`} defaultOpen={mr.files.length <= 10}>
+          <Stack gap="xs">
+            <Box direction="column" gap="xs" maxHeight={240} minWidth={0} scroll="y">
+              {mr.files.map((f) => (
+                <Row gap="xs" align="center">
+                  <Badge tone={tone[f.change]}>{code[f.change]}</Badge>
+                  <Text size="xs" truncate>
+                    {f.path}
+                  </Text>
+                </Row>
+              ))}
+            </Box>
+            <Row>
+              <Button size="sm" variant="ghost" icon="file-text" disabled={!!b} onPress={mergeDiff}>
+                Open diff
+              </Button>
+            </Row>
+          </Stack>
+        </Collapsible>
+      ) : null}
+      {mr.block ? <Callout tone="warning" title="Cannot accept here">{mr.block}</Callout> : null}
+      {mr.commits.length && !mr.block ? (
+        <Text muted size="xs">{'Accept merges into this working copy only; review, resolve conflicts, then commit as usual.'}</Text>
+      ) : null}
+    </Stack>
+  )
+}
+
 function CommitBox(props: { files: SvnFile[] }) {
   const ticks = read(checked)
   const msg = read(message)
@@ -498,6 +649,7 @@ export default function Panel() {
     <Stack gap="sm">
       <Header s={s} />
       <Branches />
+      <MergeRequests />
       <Separator />
       {s.behind ? (
         <Callout tone="warning" title="Not on the latest revision">
