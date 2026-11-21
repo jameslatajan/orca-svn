@@ -79,6 +79,8 @@ export type MergeRequest = {
   files: MergeFile[]
   /** Why Accept cannot run here (not on trunk, local changes), if anything. */
   block?: string
+  /** Local changes that cause `block` (unversioned files never block). */
+  blockers?: SvnFile[]
 }
 
 declare module 'orca' {

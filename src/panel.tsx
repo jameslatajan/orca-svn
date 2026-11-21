@@ -51,6 +51,8 @@ const mergeTargets = atom<BranchTarget[] | null>(null)
 const mergeChoice = atom('')
 const mergeReview = atom<MergeRequest | null>(null)
 const mergeError = atom<string | null>(null)
+/** Blocker revert waiting for confirmation: a path, '*' for all, or null. */
+const confirmBlocker = atom<string | null>(null)
 
 /** Case-insensitive substring match on the path; empty query matches everything. */
 export function matches(f: SvnFile, q: string): boolean {
@@ -183,6 +185,7 @@ async function commit(): Promise<void> {
   if (ok) {
     set(message, '')
     set(checked, [])
+    await refreshBlocked()
   }
 }
 const revert = (path: string) => {
@@ -351,6 +354,7 @@ const openMerge = () =>
     set(mergeReview, null)
   })
 const closeMerge = () => {
+  set(confirmBlocker, null)
   set(mergeTargets, null)
   set(mergeReview, null)
   set(mergeError, null)
@@ -367,6 +371,26 @@ const acceptMerge = () =>
     set(notice, { tone: r.conflicts.length ? 'danger' : 'success', text: r.message })
     closeMerge()
   })
+
+/** Re-reviews an open merge request that local changes blocked, so Accept unlocks once they are gone. */
+async function refreshBlocked(): Promise<void> {
+  if (read(mergeReview)?.blockers?.length) await reviewMerge()
+}
+/** Reverts blocking files (after the in-box confirmation), then re-reviews. */
+async function revertBlockers(files: string[]): Promise<void> {
+  set(confirmBlocker, null)
+  if (await run('revert', () => plugin.request('svn.revert', { files }))) await refreshBlocked()
+}
+/** Ticks the committable blockers in the normal commit form. */
+function commitBlockers(files: SvnFile[]): void {
+  const ok = files.filter(committable).map((f) => f.path)
+  set(checked, ok)
+  const skipped = files.length - ok.length
+  set(notice, {
+    tone: 'success',
+    text: `Write a message and press Commit below; the merge request refreshes after.${skipped ? ` Resolve or revert ${skipped} conflicted/missing file${skipped === 1 ? '' : 's'} first.` : ''}`
+  })
+}
 
 /** Local merge request: review a branch against its trunk and merge it into a trunk working copy. */
 function MergeRequests() {
@@ -468,9 +492,74 @@ function MergeSummary(props: { mr: MergeRequest }) {
         </Collapsible>
       ) : null}
       {mr.block ? <Callout tone="warning" title="Cannot accept here">{mr.block}</Callout> : null}
+      {mr.blockers?.length ? <MergeBlockers files={mr.blockers} /> : null}
       {mr.commits.length && !mr.block ? (
         <Text muted size="xs">{'Accept merges into this working copy only; review, resolve conflicts, then commit as usual.'}</Text>
       ) : null}
+    </Stack>
+  )
+}
+
+/** The local changes that block Accept, with diff, revert and commit shortcuts. */
+function MergeBlockers(props: { files: SvnFile[] }) {
+  const files = props.files
+  const disabled = !!read(busy)
+  const pending = read(confirmBlocker)
+  return (
+    <Stack gap="xs">
+      <Text muted size="xs">{`Blocking files · ${files.length}`}</Text>
+      <Box direction="column" gap="xs" maxHeight={240} minWidth={0} scroll="y">
+        {files.map((f) => {
+          const st = STATUS_CODE[f.status]
+          return (
+            <Stack gap="xs">
+              <Box direction="row" align="center" gap="xs" minWidth={0}>
+                <Badge tone={st.tone}>{st.code}</Badge>
+                <Box grow minWidth={0}>
+                  <Text size="xs" truncate>
+                    {f.path}
+                  </Text>
+                </Box>
+                <Box direction="row" shrink={false}>
+                  {f.status === 'modified' || f.status === 'added' || f.status === 'deleted' ? (
+                    <IconButton icon="file-text" label={`Open diff ${f.path}`} size="sm" variant="ghost" disabled={disabled} onPress={() => diff(f.path)} />
+                  ) : null}
+                  <IconButton icon="close" label={`Revert blocker ${f.path}`} size="sm" variant="ghost" disabled={disabled} onPress={() => set(confirmBlocker, f.path)} />
+                </Box>
+              </Box>
+              {pending === f.path ? (
+                <Row gap="xs">
+                  <Button size="sm" variant="solid" tone="danger" disabled={disabled} onPress={() => revertBlockers([f.path])}>
+                    {`Confirm revert ${f.path}`}
+                  </Button>
+                  <Button size="sm" variant="ghost" onPress={() => set(confirmBlocker, null)}>
+                    Cancel
+                  </Button>
+                </Row>
+              ) : null}
+            </Stack>
+          )
+        })}
+      </Box>
+      {pending === '*' ? (
+        <Row gap="xs">
+          <Button size="sm" variant="solid" tone="danger" disabled={disabled} onPress={() => revertBlockers(files.map((f) => f.path))}>
+            {`Confirm revert all ${files.length}`}
+          </Button>
+          <Button size="sm" variant="ghost" onPress={() => set(confirmBlocker, null)}>
+            Cancel
+          </Button>
+        </Row>
+      ) : (
+        <Grid columns={2} gap="xs">
+          <Button size="sm" variant="outline" icon="check" disabled={disabled} onPress={() => commitBlockers(files)}>
+            Commit these first
+          </Button>
+          <Button size="sm" variant="outline" tone="danger" icon="close" disabled={disabled} onPress={() => set(confirmBlocker, '*')}>
+            Revert all
+          </Button>
+        </Grid>
+      )}
     </Stack>
   )
 }

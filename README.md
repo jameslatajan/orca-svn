@@ -81,6 +81,9 @@ Review a branch and merge it into its trunk without typing `svn merge`:
 1. Check out (or switch to) the project's trunk, with no local changes.
 2. **Merge request…** → pick a branch → **Review** lists the commits trunk does not have yet
    (`svn mergeinfo --show-revs eligible`) and the files they touch. **Open diff** shows trunk → branch in a diff tab.
+   If local changes block Accept, the review lists them (status letter + path; unversioned files never block)
+   with **Open diff**, per-file **Revert** and **Revert all** (both confirm first), and **Commit these first**,
+   which ticks them in the normal commit form. The review refreshes after a revert or commit.
 3. **Accept merge** updates the working copy and runs `svn merge ^/branches/... .`. Conflicts land in the
    Conflicted list for **Resolve**.
 4. Nothing is committed for you: the commit form is filled with `Merge <branch> into <trunk> (rA-rB, N commits)`

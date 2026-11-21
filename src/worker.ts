@@ -429,8 +429,9 @@ export default function activate(orca: OrcaWorkerApi): void {
     return svnInvalid(async () => {
       const p = await mergePair(ws.path, lane)
       const { commits, files } = await merge.pending(options.runner, ws.path, p.source, p.sourcePath, p.target)
-      const block = merge.checkTarget(p.info.url, p.target, await svn.status(options.runner, ws.path, options.statusTimeoutMs))
-      return { lane, source: `^${p.sourcePath}`, target: `^${p.targetPath}`, commits, files, ...(block ? { block } : {}) }
+      const check = merge.checkTarget(p.info.url, p.target, await svn.status(options.runner, ws.path, options.statusTimeoutMs))
+      const extra = check ? { block: check.block, ...(check.blockers.length ? { blockers: check.blockers } : {}) } : {}
+      return { lane, source: `^${p.sourcePath}`, target: `^${p.targetPath}`, commits, files, ...extra }
     })
   })
   orca.panels.handle('svn.mergeDiff', async ({ lane }) => {
@@ -447,8 +448,8 @@ export default function activate(orca: OrcaWorkerApi): void {
   orca.panels.handle('svn.mergeAccept', async ({ lane }) => {
     const pre = await local()
     const p = await svnInvalid(() => mergePair(pre.path, lane))
-    const block = merge.checkTarget(p.info.url, p.target, await svnInvalid(() => svn.status(options.runner, pre.path, options.statusTimeoutMs)))
-    if (block) throw invalid(block)
+    const check = merge.checkTarget(p.info.url, p.target, await svnInvalid(() => svn.status(options.runner, pre.path, options.statusTimeoutMs)))
+    if (check) throw invalid(check.block)
     const revs = await svnInvalid(() => merge.eligibleRevisions(options.runner, pre.path, p.source, p.target))
     if (!revs.length) throw invalid('Nothing to merge: trunk already has every commit of this branch.')
     const commitMessage = merge.mergeMessage(`^${p.sourcePath}`, `^${p.targetPath}`, revs)
