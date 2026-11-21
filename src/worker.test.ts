@@ -1,4 +1,4 @@
-import { appendFileSync, writeFileSync } from 'node:fs'
+import { appendFileSync, readFileSync, writeFileSync } from 'node:fs'
 import { join } from 'node:path'
 import { assert, mockHost, mountWorker, test } from 'orca/testing'
 import { tempRepo } from './testRepo'
@@ -50,6 +50,23 @@ test('worker: state, commit selected files, diff in an editor tab', async () => 
   await assert.rejects(worker.request('svn.diff', { file: '../x.txt' }), /outside the working copy/)
   await assert.rejects(worker.request('svn.commit', { files: ['a.txt'], message: '  ' }), /commit message/)
   await worker.deactivate()
+})
+
+test('worker: ignore to both .gitignore and svn:ignore', async () => {
+  const { wc } = tempRepo()
+  writeFileSync(join(wc, 'debug.log'), 'x\n')
+  const worker = await mountWorker(main, { host: host(wc) })
+  const r = (await worker.request('svn.ignore', { files: ['debug.log'], target: 'both' })) as {
+    message: string
+    state: { files: { path: string }[] }
+  }
+  assert.match(r.message, /\/debug\.log to \.gitignore/)
+  assert.match(r.message, /debug\.log to svn:ignore/)
+  assert.equal(readFileSync(join(wc, '.gitignore'), 'utf8'), '/debug.log\n')
+  assert.equal(r.state.files.some((f) => f.path === 'debug.log'), false)
+  const again = (await worker.request('svn.ignore', { files: ['debug.log'], target: 'both' })) as { message: string }
+  assert.equal(again.message, 'Already in .gitignore. Already in svn:ignore.')
+  await assert.rejects(worker.request('svn.ignore', { files: ['debug.log'], target: 'nope' }), /Bad ignore target/)
 })
 
 test('worker: not a working copy, remote, no workspace', async () => {
