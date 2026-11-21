@@ -4,7 +4,8 @@ export {}
 export type FileStatus = 'conflicted' | 'modified' | 'added' | 'deleted' | 'missing' | 'unversioned'
 
 /** `ignored`: matched by .gitignore; listed apart and left out of Select all. */
-export type SvnFile = { path: string; status: FileStatus; ignored?: boolean }
+export type IgnoreTarget = 'git' | 'svn' | 'both'
+export type SvnFile ={ path: string; status: FileStatus; ignored?: boolean }
 
 export type SvnInfo = {
   url: string
@@ -113,8 +114,8 @@ declare module 'orca' {
     'svn.branchCreate': { input: { name: string; message?: string }; output: { message: string; path: string; revision: number | null } }
     /** This project's trunk and branches, for the panel's switcher; ids work with svn.switchCheck / svn.switch. */
     'svn.branches': { output: { targets: BranchTarget[] } }
-    /** Ignores files: `git` appends to the workspace .gitignore, `svn` adds to the folder's svn:ignore. */
-    'svn.ignore': { input: { files: string[]; target: 'git' | 'svn' }; output: ActionResult }
+    /** Ignores files: `git` appends to the workspace .gitignore, `svn` adds to the folder's svn:ignore, `both` does both. */
+    'svn.ignore': { input: { files: string[]; target: IgnoreTarget }; output: ActionResult }
     /** Reviews a branch lane (from svn.branches) against this project's trunk: unmerged commits and files. */
     'svn.mergeRequest': { input: { lane: string }; output: MergeRequest }
     /** Opens `svn diff` trunk -> branch in an SVN Diff editor tab. */

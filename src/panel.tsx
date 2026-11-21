@@ -24,7 +24,7 @@ import {
   Textarea,
   type PanelContext
 } from 'orca'
-import type { ActionResult, BranchTarget, FileStatus, MergeRequest, SvnFile, SvnState } from './protocol'
+import type { ActionResult, BranchTarget, FileStatus, IgnoreTarget, MergeRequest, SvnFile, SvnState } from './protocol'
 
 const state = atom<SvnState | null>(null)
 const busy = atom<string | null>(null)
@@ -38,6 +38,8 @@ const confirmRevert = atom<string | null>(null)
 const query = atom('')
 /** Path whose ignore choices are open. */
 const ignoreOpen = atom<string | null>(null)
+/** Where the open ignore choice writes to. */
+const ignoreTarget = atom<IgnoreTarget>('both')
 /** This project's trunk/branches from svn.branches; null until loaded. */
 const branches = atom<BranchTarget[] | null>(null)
 const branchChoice = atom('')
@@ -196,14 +198,48 @@ const add = (files: string[]) => run('add', () => plugin.request('svn.add', { fi
 const resolve = (path: string) => run('resolve', () => plugin.request('svn.resolve', { files: [path] }))
 const diff = (path: string) => run('diff', async () => void (await plugin.request('svn.diff', { file: path })))
 const log = () => run('log', async () => void (await plugin.request('svn.log')))
-const ignore = (path: string, target: 'git' | 'svn') => {
+const IGNORE_CHOICES: { target: IgnoreTarget; label: string; hint: string }[] = [
+  { target: 'git', label: '.gitignore', hint: 'Blocks commit in Orca SVN.' },
+  { target: 'svn', label: 'svn:ignore', hint: 'SVN hides it (new files only).' },
+  { target: 'both', label: 'Both', hint: 'Blocks commit here and SVN hides it.' },
+]
+const ignore = (path: string, target: IgnoreTarget) => {
   set(ignoreOpen, null)
+  set(ignoreTarget, 'both')
   return run('ignore', () => plugin.request('svn.ignore', { files: [path], target }))
 }
 
 function toggle(path: string, on: boolean): void {
   const now = read(checked).filter((p) => p !== path)
   set(checked, on ? [...now, path] : now)
+}
+
+/** Pick where to ignore a file. svn:ignore only applies to unversioned files, so tracked files get .gitignore only. */
+function IgnoreChoice(props: { file: SvnFile; disabled: boolean }) {
+  const f = props.file
+  const choices = f.status === 'unversioned' ? IGNORE_CHOICES : IGNORE_CHOICES.filter((c) => c.target === 'git')
+  const picked = choices.find((c) => c.target === read(ignoreTarget)) ?? choices[0]
+  return (
+    <Stack gap="xs">
+      <Text muted size="xs">{`Ignore ${splitPath(f.path).name} in:`}</Text>
+      <Row gap="xs">
+        {choices.map((c) => (
+          <Button key={c.target} size="sm" variant={c.target === picked.target ? 'solid' : 'outline'} disabled={props.disabled} onPress={() => set(ignoreTarget, c.target)}>
+            {c.label}
+          </Button>
+        ))}
+      </Row>
+      <Text muted size="xs">{f.status === 'unversioned' ? picked.hint : 'Blocks commit in Orca SVN. svn:ignore only works on new files.'}</Text>
+      <Row gap="xs">
+        <Button size="sm" variant="solid" disabled={props.disabled} onPress={() => ignore(f.path, picked.target)}>
+          Ignore
+        </Button>
+        <Button size="sm" variant="ghost" onPress={() => { set(ignoreOpen, null); set(ignoreTarget, 'both') }}>
+          Cancel
+        </Button>
+      </Row>
+    </Stack>
+  )
 }
 
 function FileRow(props: { file: SvnFile }) {
@@ -267,19 +303,7 @@ function FileRow(props: { file: SvnFile }) {
         </Row>
       ) : null}
       {read(ignoreOpen) === f.path ? (
-        <Row gap="xs">
-          <Button size="sm" variant="outline" disabled={disabled} onPress={() => ignore(f.path, 'git')}>
-            Add to .gitignore
-          </Button>
-          {f.status === 'unversioned' ? (
-            <Button size="sm" variant="outline" disabled={disabled} onPress={() => ignore(f.path, 'svn')}>
-              Add to svn:ignore
-            </Button>
-          ) : null}
-          <Button size="sm" variant="ghost" onPress={() => set(ignoreOpen, null)}>
-            Cancel
-          </Button>
-        </Row>
+        <IgnoreChoice file={f} disabled={disabled} />
       ) : null}
     </Stack>
   )
