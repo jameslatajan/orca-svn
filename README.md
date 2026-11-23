@@ -20,6 +20,7 @@ See a working copy's changes, then update, commit, revert, add, resolve and diff
 <a href="#changes-and-commit">Changes and commit</a> ·
 <a href="#history">History</a> ·
 <a href="#diffs">Diffs</a> ·
+<a href="#task-branches">Task branches</a> ·
 <a href="#requirements">Requirements</a> ·
 <a href="#develop">Develop</a>
 </p>
@@ -56,7 +57,7 @@ The **SVN** sidebar panel for Subversion working copies shows:
   A refused commit shows the hook's message and keeps your message and ticks;
 - **Update**, and per file **Diff** (opens in a terminal), **Add**, **Resolve**, **Revert** (with confirm);
   for missing files **Mark as deleted** (with confirm) and **Restore** (`svn revert` brings the file back);
-- palette: SVN: Update, SVN: Commit…, SVN: Refresh, SVN: Show log;
+- palette: SVN: Update, SVN: Commit…, SVN: New task branch…, SVN: Refresh, SVN: Show log;
 - refreshes on workspace switch, after each action, and when files change (ignores `.svn/`).
 
 <sub>Changes, conflicts and commit in the sidebar</sub>
@@ -78,6 +79,28 @@ Revision tree with branches, merges and tags.
 Diffs open in a full editor tab.
 
 <br clear="right">
+
+## Task branches
+
+One task, one branch: every change goes on a short-lived branch copied from the project's trunk, then back through
+a [merge request](#merge-requests). **New task branch…** (or palette **SVN: New task branch…**) makes that one click
+from any project working copy on `^/trunk/<project>` or one of its branches:
+
+1. Pick **Feature** or **Fix**, type a short name and, optionally, a commit message for the copy. The name is
+   slugified (`Kiosk printer!` → `fix-kiosk-printer`, at least 3 characters) and the full path is previewed, e.g.
+   `^/branches/<project>/fix-kiosk-printer` (under the `branchesPath` override, or a prefix above
+   trunk/branches/tags, when the repository has one).
+2. **Create** copies the project's trunk at HEAD on the server (`svn copy`, even when you are on another branch).
+3. Then either:
+   - **Switch here**: switches this working copy, but only with no versioned local changes (unversioned files
+     stay and never block). Blocking files are listed as in a merge request, with **Open diff**, **Revert**,
+     **Revert all** and **Commit these first**; the list follows the working copy until it is clean.
+   - **New workspace**: checks the branch out into a new folder next to this working copy
+     (`<folder>-<branch>`, `-2`… if taken) in a terminal. Orca's plugin API can only create Git worktree
+     workspaces, not open a new folder, so add that folder to Orca as a project afterwards; the panel shows the
+     `svn checkout` command to copy and says why.
+
+The new branch shows in **Switch branch…** and in the **Merge request…** list straight away.
 
 ## Merge requests
 

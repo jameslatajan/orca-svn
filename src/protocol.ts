@@ -84,6 +84,20 @@ export type MergeRequest = {
   blockers?: SvnFile[]
 }
 
+/** Where new task branches go: `base` is e.g. "^/branches/clinicsys", `trunk` "^/trunk/clinicsys". */
+export type TaskBranchInfo = { project: string; base: string; trunk: string }
+/** A created task branch: `lane` works with svn.switch* / svn.taskBranch*; `checkout` is the fallback command. */
+export type TaskBranchCreated = {
+  message: string
+  name: string
+  path: string
+  lane: string
+  revision: number | null
+  checkout: { folder: string; command: string }
+  /** Why the plugin cannot open the checkout as an Orca workspace itself. */
+  workspaceNote: string
+}
+
 declare module 'orca' {
   interface PluginRequests {
     /** SVN state of the focused workspace. */
@@ -116,6 +130,14 @@ declare module 'orca' {
     'svn.branchCreate': { input: { name: string; message?: string }; output: { message: string; path: string; revision: number | null } }
     /** This project's trunk and branches, for the panel's switcher; ids work with svn.switchCheck / svn.switch. */
     'svn.branches': { output: { targets: BranchTarget[] } }
+    /** Where task branches of this project go, for the form's preview (contacts the server). */
+    'svn.taskBranchInfo': { output: TaskBranchInfo }
+    /** Creates ^/branches/<project>/<type>-<slug> from the project's trunk HEAD (no switch). */
+    'svn.taskBranchCreate': { input: { type: string; name: string; message?: string }; output: TaskBranchCreated }
+    /** Switches to a new task branch, only with no versioned local changes; else returns the blockers. */
+    'svn.taskBranchSwitch': { input: { lane: string }; output: { blockers: SvnFile[]; block?: string; result?: ActionResult } }
+    /** Checks the branch out next to this working copy in a new terminal (Orca cannot add a folder workspace from a plugin). */
+    'svn.taskBranchCheckout': { input: { lane: string }; output: { terminalId: string; folder: string; command: string } }
     /** Ignores files: `git` appends to the workspace .gitignore, `svn` adds to the folder's svn:ignore, `both` does both. */
     'svn.ignore': { input: { files: string[]; target: IgnoreTarget }; output: ActionResult }
     /** Reviews a branch lane (from svn.branches) against this project's trunk: unmerged commits and files. */
@@ -131,6 +153,8 @@ declare module 'orca' {
     'svn.changed': SvnState
     /** Asks the panel to focus the commit form (palette "SVN: Commit…"). */
     'svn.showCommit': Record<string, never>
+    /** Asks the panel to open the New task branch form (palette "SVN: New task branch…"). */
+    'svn.showTaskBranch': Record<string, never>
     /** A running commit is still going after a while: `text` is the latest line svn or a commit hook printed, if any. */
     'svn.commitProgress': { waiting: boolean; text: string }
     /** Progress of a running `svn.history` load. */
