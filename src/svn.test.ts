@@ -143,3 +143,9 @@ test('real repo: .gitignore flags files and blocks adding them, with or without 
     await assert.rejects(svn.commit(svn.defaultRunner, wc, ['secret.env'], 'm', ['secret.env']), /ignored by \.gitignore/)
   }
 })
+
+test('hook refusals keep the hook output', () => {
+  const e = svn.mapError('svn: E165001: Commit blocked by pre-commit hook (exit code 1) with output:\nNot allowed: ask a reviewer\n')
+  assert.equal(e.kind, 'hook')
+  assert.equal(e.message, 'Commit blocked by pre-commit hook (exit code 1) with output:\nNot allowed: ask a reviewer')
+})

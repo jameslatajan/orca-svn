@@ -9,9 +9,11 @@ import * as project from './project'
 import * as merge from './merge'
 
 /** Injection points and timings; tests change them. */
-export const options: { runner: svn.SvnRunner; watchDelayMs: number; statusTimeoutMs: number } = {
+export const options: { runner: svn.SvnRunner; watchDelayMs: number; statusTimeoutMs: number; commitWaitMs: number } = {
   runner: svn.defaultRunner,
   watchDelayMs: 750,
+  /** How long a commit may run before the panel shows it as waiting (on a hook, approval, network). */
+  commitWaitMs: 4000,
   statusTimeoutMs: svn.DEFAULT_TIMEOUT_MS
 }
 
@@ -203,9 +205,28 @@ export default function activate(orca: OrcaWorkerApi): void {
     const r = await act(
       async (ws) => {
         const now = (await readState(orca)).files
-        const unversioned = new Set(now.filter((f) => f.status === 'unversioned').map((f) => f.path))
+        const of = (st: string) => new Set(now.filter((f) => f.status === st).map((f) => f.path))
+        const unversioned = of('unversioned')
+        const missing = of('missing')
         const toAdd = files.filter((f) => unversioned.has(f))
-        return svn.commit(options.runner, ws.path, files, message, toAdd)
+        const toDelete = files.filter((f) => missing.has(f))
+        // A commit held by a hook (or an approval step) can run for a long time: after a short
+        // while tell the panel it is waiting, and pass on whatever svn or the hook prints.
+        let last = ''
+        let waiting = false
+        const tell = () => void orca.panels.post('svn.commitProgress', { waiting, text: last })
+        const timer = setTimeout(() => ((waiting = true), tell()), options.commitWaitMs)
+        const onOutput = (text: string) => {
+          const line = text.split(/\r?\n/).map((l) => l.trim()).filter(Boolean).pop()
+          if (!line) return
+          last = line
+          if (waiting) tell()
+        }
+        try {
+          return await svn.commit(options.runner, ws.path, files, message, toAdd, undefined, toDelete, onOutput)
+        } finally {
+          clearTimeout(timer)
+        }
       },
       (rev) => (rev != null ? `Committed revision ${rev}.` : 'Nothing was committed.')
     )
@@ -213,6 +234,13 @@ export default function activate(orca: OrcaWorkerApi): void {
   })
   orca.panels.handle('svn.revert', async ({ files }) => {
     const { message, state } = await act((ws) => svn.revert(options.runner, ws.path, files), () => `Reverted ${plural(files.length, 'file')}.`)
+    return { message, state }
+  })
+  orca.panels.handle('svn.markDeleted', async ({ files }) => {
+    const { message, state } = await act(
+      (ws) => svn.markDeleted(options.runner, ws.path, files),
+      () => `Marked ${plural(files.length, 'file')} as deleted.`
+    )
     return { message, state }
   })
   orca.panels.handle('svn.add', async ({ files }) => {

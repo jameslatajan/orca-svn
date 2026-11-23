@@ -1,4 +1,5 @@
-import { appendFileSync, readFileSync, writeFileSync } from 'node:fs'
+import { execFileSync } from 'node:child_process'
+import { appendFileSync, existsSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
 import { join } from 'node:path'
 import { assert, mockHost, mountWorker, test } from 'orca/testing'
 import { tempRepo } from './testRepo'
@@ -109,4 +110,76 @@ test('worker: file edits outside .svn refresh the panel', async () => {
   const last = posts[posts.length - 1].payload as { files: { path: string; status: string }[] }
   assert.deepEqual(last.files, [{ path: 'a.txt', status: 'modified' }])
   await worker.deactivate()
+})
+
+test('worker: commit a missing file; mark as deleted and restore', async () => {
+  const { wc } = tempRepo()
+  writeFileSync(join(wc, 'b.txt'), 'b\n')
+  const worker = await mountWorker(main, { host: host(wc) })
+  await worker.request('svn.add', { files: ['b.txt'] })
+  await worker.request('svn.commit', { files: ['b.txt'], message: 'add b' })
+
+  // Restore brings a missing file back.
+  rmSync(join(wc, 'a.txt'))
+  let s = (await worker.request('svn.state')) as { files: { path: string; status: string }[] }
+  assert.deepEqual(s.files, [{ path: 'a.txt', status: 'missing' }])
+  const restored = (await worker.request('svn.revert', { files: ['a.txt'] })) as { state: { files: unknown[] } }
+  assert.deepEqual(restored.state.files, [])
+  assert.equal(readFileSync(join(wc, 'a.txt'), 'utf8'), 'one\n')
+
+  // Mark as deleted schedules it (D) and keeps it gone.
+  rmSync(join(wc, 'a.txt'))
+  const marked = (await worker.request('svn.markDeleted', { files: ['a.txt'] })) as { message: string; state: { files: unknown[] } }
+  assert.equal(marked.message, 'Marked 1 file as deleted.')
+  assert.deepEqual(marked.state.files, [{ path: 'a.txt', status: 'deleted' }])
+  assert.equal(existsSync(join(wc, 'a.txt')), false)
+
+  // A missing file goes in one commit together with a modified one.
+  rmSync(join(wc, 'b.txt'))
+  appendFileSync(join(wc, 'new.txt'), 'n\n')
+  s = (await worker.request('svn.state')) as { files: { path: string; status: string }[] }
+  assert.deepEqual(s.files.find((f) => f.path === 'b.txt'), { path: 'b.txt', status: 'missing' })
+  const r = (await worker.request('svn.commit', { files: ['a.txt', 'b.txt', 'new.txt'], message: 'remove a and b' })) as {
+    revision: number
+    state: { files: unknown[] }
+  }
+  assert.equal(r.revision, 3)
+  assert.deepEqual(r.state.files, [])
+  const log = execFileSync('svn', ['log', '-v', '-r', '3', '--xml'], { cwd: wc, encoding: 'utf8' })
+  assert.match(log, /action="D"[^>]*>\/a\.txt/)
+  assert.match(log, /action="D"[^>]*>\/b\.txt/)
+  assert.match(log, /action="A"[^>]*>\/new\.txt/)
+  await worker.deactivate()
+})
+
+test('worker: a slow commit reports waiting with what svn printed; hook refusals show the hook output', async () => {
+  const { wc } = tempRepo()
+  appendFileSync(join(wc, 'a.txt'), 'more\n')
+  const saved = main.options.runner
+  const savedWait = main.options.commitWaitMs
+  main.options.commitWaitMs = 50
+  let refuse = false
+  main.options.runner = async (args, cwd, timeoutMs, onOutput) => {
+    if (args.includes('commit')) {
+      onOutput?.('Waiting for approval from the commit guard...\n')
+      await wait(200)
+      if (refuse)
+        return { stdout: '', code: 1, stderr: 'svn: E165001: Commit blocked by pre-commit hook (exit code 1) with output:\nDenied: needs review\n' }
+    }
+    return saved(args, cwd, timeoutMs, onOutput)
+  }
+  try {
+    const worker = await mountWorker(main, { host: host(wc) })
+    const r = (await worker.request('svn.commit', { files: ['a.txt'], message: 'slow' })) as { revision: number }
+    assert.equal(r.revision, 2)
+    const progress = worker.posts.filter((p) => p.event === 'svn.commitProgress').map((p) => p.payload)
+    assert.ok(progress.some((p) => JSON.stringify(p) === JSON.stringify({ waiting: true, text: 'Waiting for approval from the commit guard...' })), JSON.stringify(progress))
+    appendFileSync(join(wc, 'a.txt'), 'again\n')
+    refuse = true
+    await assert.rejects(worker.request('svn.commit', { files: ['a.txt'], message: 'blocked' }), /Denied: needs review/)
+    await worker.deactivate()
+  } finally {
+    main.options.runner = saved
+    main.options.commitWaitMs = savedWait
+  }
 })

@@ -183,10 +183,14 @@ test('merge request: lists blocking files; revert and commit them, then Accept u
   assert.deepEqual(diffs, [{ file: 'a.txt' }])
 
   // Per-file revert asks first.
-  await view.press({ label: 'Revert blocker gone.txt' })
+  // Missing files get Mark as deleted / Restore instead of Revert.
+  assert.ok(view.find({ label: 'Mark as deleted gone.txt' }))
+  assert.ok(view.find({ label: 'Restore gone.txt' }))
+  assert.ok(!view.find({ label: 'Revert blocker gone.txt' }))
+  await view.press({ label: 'Revert blocker b.txt' })
   assert.deepEqual(reverts, [])
-  await view.press({ text: 'Confirm revert gone.txt' })
-  assert.deepEqual(reverts, [{ files: ['gone.txt'] }])
+  await view.press({ text: 'Confirm revert b.txt' })
+  assert.deepEqual(reverts, [{ files: ['b.txt'] }])
   assert.ok(view.find({ text: 'Blocking files · 2' }))
 
   // Commit these first ticks them in the normal commit form.
@@ -232,5 +236,71 @@ test('merge request: revert all needs confirmation', async () => {
   assert.deepEqual(reverts, [{ files: ['a.txt', 'c.txt'] }])
   assert.ok(!view.find({ text: 'Blocking files · 2' }))
   assert.ok(!view.find({ text: 'Cannot accept here' }) && !view.find({ label: 'Cannot accept here' }))
+  await view.unmount()
+})
+
+test('missing files: tick to commit, mark as deleted with confirmation, restore', async () => {
+  const calls: unknown[] = []
+  const missing: SvnState = { ...dirty, files: [{ path: 'gone.txt', status: 'missing' }] }
+  const host = mockHost({
+    requests: {
+      'svn.state': missing,
+      'svn.markDeleted': (input) => (calls.push(['markDeleted', input]), { message: 'Marked 1 file as deleted.', state: missing }),
+      'svn.revert': (input) => (calls.push(['revert', input]), { message: 'Reverted 1 file.', state: missing }),
+      'svn.commit': (input) => (calls.push(['commit', input]), { message: 'Committed revision 6.', state: clean, revision: 6 })
+    }
+  })
+  const view = await mount(panel, { host })
+  await view.press({ label: 'Mark as deleted gone.txt' })
+  assert.deepEqual(calls, [])
+  await view.press({ text: 'Confirm mark as deleted' })
+  await view.press({ label: 'Restore gone.txt' })
+  assert.deepEqual(calls, [['markDeleted', { files: ['gone.txt'] }], ['revert', { files: ['gone.txt'] }]])
+  await view.toggle({ label: ' ' })
+  await view.type({ label: 'Commit message' }, 'Drop gone')
+  await view.press({ text: 'Commit 1 file' })
+  assert.deepEqual(calls[2], ['commit', { files: ['gone.txt'], message: 'Drop gone' }])
+  await view.unmount()
+})
+
+test('commit in progress: spinner, waiting note, then error keeps message and ticks', async () => {
+  let finish: (ok: boolean) => void = () => {}
+  let count = 0
+  const host = mockHost({
+    requests: {
+      'svn.state': dirty,
+      'svn.commit': () => {
+        count++
+        return new Promise((done, fail) => {
+          finish = (ok) => (ok ? done({ message: 'Committed revision 6.', state: clean, revision: 6 }) : fail(new Error('Commit blocked by pre-commit hook:\nDenied')))
+        })
+      }
+    }
+  })
+  const view = await mount(panel, { host })
+  await view.toggle({ label: ' ' })
+  await view.type({ label: 'Commit message' }, 'Slow one')
+  const tick = (ms = 30) => new Promise((r) => setTimeout(r, ms))
+  const seen: Record<string, boolean> = {}
+  const pressed = view.press({ text: 'Commit 1 file' })
+  await Promise.race([pressed, tick()])
+  seen.spinner = !!(view.find({ text: 'Committing…' }) ?? view.find({ label: 'Committing…' }))
+  void view.post('svn.commitProgress', { waiting: true, text: 'Waiting for approval' })
+  await tick()
+  seen.waiting = !!view.find({ text: 'Waiting for approval' })
+  seen.title = !!(view.find({ label: 'Commit is waiting' }) ?? view.find({ text: 'Commit is waiting' }))
+  finish(false)
+  await pressed
+  assert.deepEqual(seen, { spinner: true, waiting: true, title: true })
+  assert.equal(count, 1)
+  assert.ok(view.find({ text: 'Commit blocked by pre-commit hook:\nDenied' }))
+  assert.ok(!view.find({ text: 'Waiting for approval' }))
+  // Message and selection survive; the button works again.
+  const again = view.press({ text: 'Commit 1 file' })
+  await Promise.race([again, tick()])
+  finish(true)
+  await again
+  assert.equal(count, 2)
+  assert.ok(view.find({ text: 'Committed revision 6.' }))
   await view.unmount()
 })
