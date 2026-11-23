@@ -1,5 +1,5 @@
 import { execFileSync } from 'node:child_process'
-import { appendFileSync, existsSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
+import { appendFileSync, existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
 import { join } from 'node:path'
 import { assert, mockHost, mountWorker, test } from 'orca/testing'
 import { tempRepo } from './testRepo'
@@ -149,6 +149,40 @@ test('worker: commit a missing file; mark as deleted and restore', async () => {
   assert.match(log, /action="D"[^>]*>\/a\.txt/)
   assert.match(log, /action="D"[^>]*>\/b\.txt/)
   assert.match(log, /action="A"[^>]*>\/new\.txt/)
+  await worker.deactivate()
+})
+
+test('worker: a deleted directory and the files in it are committable', async () => {
+  const { wc } = tempRepo()
+  mkdirSync(join(wc, 'session', 'ci'), { recursive: true })
+  writeFileSync(join(wc, 'session', 'x.txt'), 'x\n')
+  writeFileSync(join(wc, 'session', 'ci', 'y.txt'), 'y\n')
+  mkdirSync(join(wc, 'hist'))
+  writeFileSync(join(wc, 'hist', 'z.txt'), 'z\n')
+  execFileSync('svn', ['add', '-q', 'session', 'hist'], { cwd: wc })
+  execFileSync('svn', ['commit', '-q', '-m', 'dirs'], { cwd: wc })
+  rmSync(join(wc, 'session'), { recursive: true })
+  rmSync(join(wc, 'hist'), { recursive: true })
+  const worker = await mountWorker(main, { host: host(wc) })
+  const s = (await worker.request('svn.state')) as { files: { path: string; status: string }[] }
+  const paths = s.files.map((f) => f.path).sort()
+  assert.deepEqual(paths, ['hist', 'hist/z.txt', 'session', 'session/ci', 'session/ci/y.txt', 'session/x.txt'])
+  assert.ok(s.files.every((f) => f.status === 'missing'))
+  // Select all: the directories with the files inside them, in one commit.
+  const r = (await worker.request('svn.commit', { files: paths, message: 'drop dirs' })) as { revision: number; state: { files: unknown[] } }
+  assert.equal(r.revision, 3)
+  assert.deepEqual(r.state.files, [])
+  // Ticking only the directory takes the files in it along.
+  execFileSync('svn', ['update', '-q'], { cwd: wc })
+  mkdirSync(join(wc, 'd'))
+  writeFileSync(join(wc, 'd', 'f.txt'), 'f\n')
+  execFileSync('svn', ['add', '-q', 'd'], { cwd: wc })
+  execFileSync('svn', ['commit', '-q', '-m', 'add d'], { cwd: wc })
+  execFileSync('svn', ['update', '-q'], { cwd: wc })
+  rmSync(join(wc, 'd'), { recursive: true })
+  const one = (await worker.request('svn.commit', { files: ['d'], message: 'drop d' })) as { revision: number; state: { files: unknown[] } }
+  assert.equal(one.revision, 5)
+  assert.deepEqual(one.state.files, [])
   await worker.deactivate()
 })
 

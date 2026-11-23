@@ -133,6 +133,13 @@ export type Progress = (p: { step: string; done: number; total: number }) => voi
 /** Called with a partial graph each time a stage finishes, before the final result. */
 export type Partial = (graph: HistoryGraph) => void
 
+/** Neither trunk nor the current line could be read: report svn's error instead of an empty graph
+ *  (which the panel would show as "No revisions match the filter"). */
+function noLanes(trunk: LaneInput | null, own: LaneInput | null, failure: unknown): void {
+  if (trunk || own) return
+  throw failure ?? new svn.SvnError('Could not read the revision history.', 'other')
+}
+
 type TagInput = { name: string; path: string; entries: svn.LogEntry[] }
 
 /**
@@ -155,6 +162,7 @@ export async function loadHistory(
   const urlOf = (path: string) => root.replace(/\/+$/, '') + path
   const opts = { limit: LIMITS.revisionsPerLane, verbose: true, stopOnCopy: true }
   const urls: LaneUrls = new Map()
+  let failure: unknown
 
   /** One lane's newest page; `withFirst` also fetches its creating copy, in parallel. */
   const laneLog = async (id: string, name: string, kind: 'trunk' | 'branch', path: string, withFirst = false): Promise<LaneInput | null> => {
@@ -167,13 +175,15 @@ export async function loadHistory(
       const more = entries.length === LIMITS.revisionsPerLane
       const first = more ? firstPage[0] : undefined
       return { id, name, kind, path, entries, more, ...(first ? { first } : {}) }
-    } catch {
+    } catch (err) {
+      failure ??= err
       return null // e.g. a branch without this project's subfolder
     }
   }
 
   if (!layout) {
     const only = await laneLog('main', current.split('/').pop() || '/', 'trunk', current)
+    noLanes(only, null, failure)
     const input = { lanes: only ? [only] : [], current, tags: [], mergeinfo: '', standard: false }
     return { graph: withMore(input), urls, input }
   }
@@ -207,6 +217,7 @@ export async function loadHistory(
   const origin = own ? laneOrigin(own) : null
   const project = !layout.suffix && origin && origin.path.startsWith(trunkRoot + '/') ? origin.path : null
   const trunk = await laneLog('trunk', 'trunk', 'trunk', project ?? `${trunkRoot}${layout.suffix}`)
+  noLanes(trunk, own, failure)
   partial(emit([trunk, own], [], '').graph)
 
   // Stage 2: the other recent branches (only this project's, for a project branch).
@@ -252,6 +263,7 @@ async function loadProjectHistory(
   const urlOf = (path: string) => root.replace(/\/+$/, '') + path
   const opts = { limit: LIMITS.revisionsPerLane, verbose: true, stopOnCopy: true }
   const urls: LaneUrls = new Map()
+  let failure: unknown
   const laneLog = async (id: string, name: string, kind: 'trunk' | 'branch', path: string, withFirst = false): Promise<LaneInput | null> => {
     try {
       const [entries, firstPage] = await Promise.all([
@@ -262,7 +274,8 @@ async function loadProjectHistory(
       const more = entries.length === LIMITS.revisionsPerLane
       const first = more ? firstPage[0] : undefined
       return { id, name, kind, path, entries, more, ...(first ? { first } : {}) }
-    } catch {
+    } catch (err) {
+      failure ??= err
       return null
     }
   }
@@ -287,6 +300,7 @@ async function loadProjectHistory(
     laneLog('trunk', 'trunk', 'trunk', scope.trunkPath),
     ownPath ? laneLog(`b:${loc.name}`, loc.name, 'branch', ownPath, true) : Promise.resolve(null)
   ])
+  noLanes(trunk, own, failure)
   partial(emit([trunk, own], [], '').graph)
 
   progress({ step: 'Reading branches…', done: 1, total: 3 })
