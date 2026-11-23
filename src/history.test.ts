@@ -90,3 +90,13 @@ test('real repo: trunk, a branch, a tag and a merge', { skip: !hasSvn() }, async
   assert.ok(execFileSync('svn', ['status', '--xml'], { cwd: wc }).toString().includes('orca-svn-diffs'))
   assert.ok(!parseStatus(execFileSync('svn', ['status', '--xml', '.'], { cwd: sub }).toString(), sub).some((f) => f.path.includes('orca-svn-diffs')))
 })
+
+test('loadHistory reports svn errors instead of an empty graph', async () => {
+  const run = async (args: string[]) => {
+    if (args.includes('info') && args.includes('--xml'))
+      return { code: 0, stderr: '', stdout: '<info><entry revision="76"><url>https://svn.example/r/trunk/app</url><relative-url>^/trunk/app</relative-url></entry></info>' }
+    if (args.includes('repos-root-url')) return { code: 0, stderr: '', stdout: 'https://svn.example/r\n' }
+    return { code: 1, stdout: '', stderr: "svn: E215004: No more credentials or we tried too many times.\nAuthentication failed\n" }
+  }
+  await assert.rejects(loadHistory(run, '/wc'), /login|credentials|Authentication/i)
+})

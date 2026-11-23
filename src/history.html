@@ -220,7 +220,21 @@
   }
   // Date range filter (local days, inclusive); applied to loaded revisions, paging further back as needed.
   const range = { from: '', to: '', q: '' }
-  const dayOf = (iso) => { const d = new Date(iso); return isNaN(d) ? '' : `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}` }
+  const ymd = (d) => `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`
+  /** svn's UTC timestamp ("2025-01-02T03:04:05.123456Z") → local day. Parsed by hand: some engines reject 6 fraction digits. */
+  const dayOf = (iso) => {
+    const m = /^(\d{4})-(\d\d)-(\d\d)T(\d\d):(\d\d):(\d\d)/.exec(iso || '')
+    return m ? ymd(new Date(Date.UTC(+m[1], m[2] - 1, +m[3], +m[4], +m[5], +m[6]))) : ''
+  }
+  /** A date input's value as YYYY-MM-DD whatever the locale shows (MM/DD/YYYY, DD.MM.YYYY…); '' when unset or invalid. */
+  const dayInput = (el) => {
+    const d = el.valueAsDate
+    if (d && !isNaN(d)) return `${d.getUTCFullYear()}-${String(d.getUTCMonth() + 1).padStart(2, '0')}-${String(d.getUTCDate()).padStart(2, '0')}`
+    const v = (el.value || '').trim()
+    if (/^\d{4}-\d\d-\d\d$/.test(v)) return v
+    const us = /^(\d{1,2})\/(\d{1,2})\/(\d{4})$/.exec(v)
+    return us ? `${us[3]}-${us[1].padStart(2, '0')}-${us[2].padStart(2, '0')}` : ''
+  }
   const inRange = (r) => { const d = dayOf(r.date); return (!range.from || d >= range.from) && (!range.to || d <= range.to) && (!range.q || `r${r.revision} ${r.message} ${r.author}`.toLowerCase().includes(range.q)) }
   const filtering = () => !!(range.from || range.to || range.q)
   /** Older pages can't contain revisions in range once the oldest loaded one is before `from`. */
@@ -231,7 +245,7 @@
     return [...oldest.values()].every((d) => dayOf(d) < range.from)
   }
   function onRange() {
-    range.from = $('from').value; range.to = $('to').value; range.q = $('q').value.trim().toLowerCase()
+    range.from = dayInput($('from')); range.to = dayInput($('to')); range.q = $('q').value.trim().toLowerCase()
     $('clearRange').hidden = !filtering()
     if (selected && graph && !graph.revisions.some((r) => r.revision === selected.revision && r.lane === selected.lane && inRange(r))) closeDetail()
     $('scroll').scrollTop = 0
@@ -257,7 +271,7 @@
     $('more').textContent = graph && graph.revisions.length
       ? (filtering() ? `${revs.length} of ${graph.revisions.length} loaded revisions match` + (end ? '' : ' · loading older…') : (graph.hasMore ? '' : 'Start of history'))
       : ''
-    if (!graph || !revs.length) { g.innerHTML = graph ? `<div class="notice">${filtering() ? 'No revisions match the filter.' : 'No revisions.'}</div>` : ''; lg.innerHTML = ''; $('where').textContent = ''; return }
+    if (!graph || !revs.length) { g.innerHTML = graph ? `<div class="notice">${filtering() && graph.revisions.length ? 'No revisions match the filter.' : 'No revisions found for this working copy.'}</div>` : ''; lg.innerHTML = ''; $('where').textContent = ''; return }
     const laneIx = new Map(graph.lanes.map((l, i) => [l.id, i]))
     const color = (id) => COLORS[(laneIx.get(id) ?? 0) % COLORS.length]
     const x = (id) => PAD + (laneIx.get(id) ?? 0) * LANE
