@@ -172,6 +172,20 @@ test('worker: a deleted directory and the files in it are committable', async ()
   const r = (await worker.request('svn.commit', { files: paths, message: 'drop dirs' })) as { revision: number; state: { files: unknown[] } }
   assert.equal(r.revision, 3)
   assert.deepEqual(r.state.files, [])
+  // A file inside a missing directory first, then the directory in a later commit.
+  execFileSync('svn', ['update', '-q'], { cwd: wc })
+  mkdirSync(join(wc, 'e'))
+  writeFileSync(join(wc, 'e', 'g.txt'), 'g\n')
+  writeFileSync(join(wc, 'e', 'h.txt'), 'h\n')
+  execFileSync('svn', ['add', '-q', 'e'], { cwd: wc })
+  execFileSync('svn', ['commit', '-q', '-m', 'add e'], { cwd: wc })
+  rmSync(join(wc, 'e'), { recursive: true })
+  const child = (await worker.request('svn.commit', { files: ['e/g.txt'], message: 'drop g' })) as { revision: number }
+  assert.equal(child.revision, 5)
+  const later = (await worker.request('svn.commit', { files: ['e', 'e/h.txt'], message: 'drop e' })) as { revision: number; state: { files: unknown[] } }
+  assert.equal(later.revision, 6)
+  assert.deepEqual(later.state.files, [])
+  assert.equal(existsSync(join(wc, 'e')), false)
   // Ticking only the directory takes the files in it along.
   execFileSync('svn', ['update', '-q'], { cwd: wc })
   mkdirSync(join(wc, 'd'))
@@ -181,7 +195,7 @@ test('worker: a deleted directory and the files in it are committable', async ()
   execFileSync('svn', ['update', '-q'], { cwd: wc })
   rmSync(join(wc, 'd'), { recursive: true })
   const one = (await worker.request('svn.commit', { files: ['d'], message: 'drop d' })) as { revision: number; state: { files: unknown[] } }
-  assert.equal(one.revision, 5)
+  assert.equal(one.revision, 8)
   assert.deepEqual(one.state.files, [])
   await worker.deactivate()
 })

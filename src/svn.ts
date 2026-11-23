@@ -300,8 +300,17 @@ export async function commit(
   const msgFile = join(dir, 'message.txt')
   try {
     writeFileSync(msgFile, message, 'utf8')
-    const out = await svn(run, ['commit', '-F', msgFile, '--encoding', 'utf-8', '--', ...paths], cwd, LONG_TIMEOUT_MS, onOutput)
-    return parseRevision(out)
+    const args = ['commit', '-F', msgFile, '--encoding', 'utf-8', '--', ...paths]
+    try {
+      return parseRevision(await svn(run, args, cwd, LONG_TIMEOUT_MS, onOutput))
+    } catch (err) {
+      // A missing folder whose child was committed earlier keeps its older base revision, so
+      // deleting it is "out of date". Bring just those entries (now scheduled for deletion, so
+      // nothing comes back on disk) up to date and try once more.
+      if (!(err instanceof SvnError) || err.kind !== 'out-of-date' || !toDelete.length) throw err
+      await svn(run, ['update', '--depth', 'empty', '--', ...safeFiles(cwd, toDelete)], cwd, LONG_TIMEOUT_MS)
+      return parseRevision(await svn(run, args, cwd, LONG_TIMEOUT_MS, onOutput))
+    }
   } finally {
     rmSync(dir, { recursive: true, force: true })
   }
