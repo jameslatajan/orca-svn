@@ -55,6 +55,10 @@ const mergeReview = atom<MergeRequest | null>(null)
 const mergeError = atom<string | null>(null)
 /** Blocker revert waiting for confirmation: a path, '*' for all, or null. */
 const confirmBlocker = atom<string | null>(null)
+/** Missing (`!`) path waiting for "Confirm mark as deleted". */
+const confirmDelete = atom<string | null>(null)
+/** Set while a commit has run for a while: the latest line svn or a commit hook printed. */
+const commitWait = atom<{ text: string } | null>(null)
 
 /** Case-insensitive substring match on the path; empty query matches everything. */
 export function matches(f: SvnFile, q: string): boolean {
@@ -83,8 +87,9 @@ export const STATUS_CODE: Record<FileStatus, { code: string; tone: 'neutral' | '
 
 const CHANGES: FileStatus[] = ['modified', 'added', 'deleted', 'missing']
 
-/** Files that can be committed (missing must be deleted or restored first; conflicts resolved). */
-export const committable = (f: SvnFile) => f.status !== 'missing' && f.status !== 'conflicted'
+/** Files that can be committed (conflicts must be resolved first). Missing (`!`) files are
+ *  `svn delete`d as part of the commit. */
+export const committable = (f: SvnFile) => f.status !== 'conflicted'
 
 /** "a/b/c.txt" -> { name: "c.txt", dir: "a/b" }. */
 export function splitPath(path: string): { name: string; dir: string } {
@@ -182,8 +187,12 @@ async function switchBranch(): Promise<void> {
   }
 }
 async function commit(): Promise<void> {
+  if (read(busy)) return // no double submits
   const files = read(checked)
+  set(commitWait, null)
   const ok = await run('commit', () => plugin.request('svn.commit', { files, message: read(message) }))
+  set(commitWait, null)
+  // On failure the message and ticks stay as they were, so the user can retry.
   if (ok) {
     set(message, '')
     set(checked, [])
@@ -193,6 +202,14 @@ async function commit(): Promise<void> {
 const revert = (path: string) => {
   set(confirmRevert, null)
   return run('revert', () => plugin.request('svn.revert', { files: [path] }))
+}
+/** Restore a missing file (`svn revert` brings it back from the base). */
+async function restore(files: string[]): Promise<void> {
+  if (await run('restore', () => plugin.request('svn.revert', { files }))) await refreshBlocked()
+}
+async function markDeleted(path: string): Promise<void> {
+  set(confirmDelete, null)
+  if (await run('markDeleted', () => plugin.request('svn.markDeleted', { files: [path] }))) await refreshBlocked()
 }
 const add = (files: string[]) => run('add', () => plugin.request('svn.add', { files }))
 const resolve = (path: string) => run('resolve', () => plugin.request('svn.resolve', { files: [path] }))
@@ -235,6 +252,23 @@ function IgnoreChoice(props: { file: SvnFile; disabled: boolean }) {
           Ignore
         </Button>
         <Button size="sm" variant="ghost" onPress={() => { set(ignoreOpen, null); set(ignoreTarget, 'both') }}>
+          Cancel
+        </Button>
+      </Row>
+    </Stack>
+  )
+}
+
+/** Confirmation for "Mark as deleted": `svn delete --keep-local` of a missing file. */
+function ConfirmDelete(props: { path: string; disabled: boolean }) {
+  return (
+    <Stack gap="xs">
+      <Text muted size="xs">{`Schedule ${splitPath(props.path).name} for deletion? It is removed from SVN on the next commit.`}</Text>
+      <Row gap="xs">
+        <Button size="sm" variant="solid" tone="danger" disabled={props.disabled} onPress={() => markDeleted(props.path)}>
+          Confirm mark as deleted
+        </Button>
+        <Button size="sm" variant="ghost" onPress={() => set(confirmDelete, null)}>
           Cancel
         </Button>
       </Row>
@@ -287,7 +321,13 @@ function FileRow(props: { file: SvnFile }) {
           {!f.ignored && f.status !== 'conflicted' ? (
             <IconButton icon="more" label={`Ignore ${f.path}`} size="sm" variant="ghost" disabled={disabled} onPress={() => set(ignoreOpen, read(ignoreOpen) === f.path ? null : f.path)} />
           ) : null}
-          {f.status !== 'unversioned' ? (
+          {f.status === 'missing' ? (
+            <IconButton icon="delete" label={`Mark as deleted ${f.path}`} size="sm" variant="ghost" tone="danger" disabled={disabled} onPress={() => set(confirmDelete, f.path)} />
+          ) : null}
+          {f.status === 'missing' ? (
+            <IconButton icon="refresh" label={`Restore ${f.path}`} size="sm" variant="ghost" disabled={disabled} onPress={() => restore([f.path])} />
+          ) : null}
+          {f.status !== 'unversioned' && f.status !== 'missing' ? (
             <IconButton icon="close" label={`Revert ${f.path}`} size="sm" variant="ghost" disabled={disabled} onPress={() => set(confirmRevert, f.path)} />
           ) : null}
         </Box>
@@ -302,6 +342,7 @@ function FileRow(props: { file: SvnFile }) {
           </Button>
         </Row>
       ) : null}
+      {read(confirmDelete) === f.path ? <ConfirmDelete path={f.path} disabled={disabled} /> : null}
       {read(ignoreOpen) === f.path ? (
         <IgnoreChoice file={f} disabled={disabled} />
       ) : null}
@@ -412,7 +453,7 @@ function commitBlockers(files: SvnFile[]): void {
   const skipped = files.length - ok.length
   set(notice, {
     tone: 'success',
-    text: `Write a message and press Commit below; the merge request refreshes after.${skipped ? ` Resolve or revert ${skipped} conflicted/missing file${skipped === 1 ? '' : 's'} first.` : ''}`
+    text: `Write a message and press Commit below; the merge request refreshes after.${skipped ? ` Resolve or revert ${skipped} conflicted file${skipped === 1 ? '' : 's'} first.` : ''}`
   })
 }
 
@@ -548,9 +589,17 @@ function MergeBlockers(props: { files: SvnFile[] }) {
                   {f.status === 'modified' || f.status === 'added' || f.status === 'deleted' ? (
                     <IconButton icon="file-text" label={`Open diff ${f.path}`} size="sm" variant="ghost" disabled={disabled} onPress={() => diff(f.path)} />
                   ) : null}
-                  <IconButton icon="close" label={`Revert blocker ${f.path}`} size="sm" variant="ghost" disabled={disabled} onPress={() => set(confirmBlocker, f.path)} />
+                  {f.status === 'missing' ? (
+                    <IconButton icon="delete" label={`Mark as deleted ${f.path}`} size="sm" variant="ghost" tone="danger" disabled={disabled} onPress={() => set(confirmDelete, f.path)} />
+                  ) : null}
+                  {f.status === 'missing' ? (
+                    <IconButton icon="refresh" label={`Restore ${f.path}`} size="sm" variant="ghost" disabled={disabled} onPress={() => restore([f.path])} />
+                  ) : (
+                    <IconButton icon="close" label={`Revert blocker ${f.path}`} size="sm" variant="ghost" disabled={disabled} onPress={() => set(confirmBlocker, f.path)} />
+                  )}
                 </Box>
               </Box>
+              {read(confirmDelete) === f.path ? <ConfirmDelete path={f.path} disabled={disabled} /> : null}
               {pending === f.path ? (
                 <Row gap="xs">
                   <Button size="sm" variant="solid" tone="danger" disabled={disabled} onPress={() => revertBlockers([f.path])}>
@@ -588,6 +637,20 @@ function MergeBlockers(props: { files: SvnFile[] }) {
   )
 }
 
+/** Spinner while committing; after a while, a waiting note with what svn or a hook last printed. */
+function CommitProgress() {
+  const w = read(commitWait)
+  if (!w) return <Spinner label="Committing…" />
+  return (
+    <Callout tone="warning" title="Commit is waiting">
+      <Stack gap="xs">
+        <Spinner label="Still committing…" />
+        <Text size="sm">{w.text || 'svn has not finished yet. A commit hook or approval step may be holding it; it continues once that finishes.'}</Text>
+      </Stack>
+    </Callout>
+  )
+}
+
 function CommitBox(props: { files: SvnFile[] }) {
   const ticks = read(checked)
   const msg = read(message)
@@ -601,9 +664,11 @@ function CommitBox(props: { files: SvnFile[] }) {
       <Button variant="solid" tone="accent" icon="check" disabled={!!b || !!reason} onPress={commit}>
         {b === 'commit' ? 'Committing…' : n ? `Commit ${n} ${n === 1 ? 'file' : 'files'}` : 'Commit'}
       </Button>
-      <Text muted size="xs">
-        {reason ?? `${n} of ${total} selected`}
-      </Text>
+      {b === 'commit' ? <CommitProgress /> : (
+        <Text muted size="xs">
+          {reason ?? `${n} of ${total} selected`}
+        </Text>
+      )}
     </Stack>
   )
 }
@@ -790,6 +855,7 @@ export default function Panel() {
 
 export function setup(ctx: PanelContext): void {
   ctx.subscriptions.push(plugin.on('svn.changed', (payload) => receive(payload)))
+  ctx.subscriptions.push(plugin.on('svn.commitProgress', (p) => { if (read(busy) === 'commit' && p.waiting) set(commitWait, { text: p.text }) }))
   ctx.subscriptions.push(plugin.on('svn.showCommit', () => set(notice, { tone: 'success', text: 'Write a message, tick files, then press Commit.' })))
   void load()
 }

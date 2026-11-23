@@ -49,8 +49,13 @@ The **SVN** sidebar panel for Subversion working copies shows:
 
 - working-copy URL and revision;
 - changed files grouped as Conflicted, Modified, Added, Deleted, Missing, Unversioned;
-- tick files, write a message, **Commit** (unversioned files you tick are added first);
+- tick files, write a message, **Commit** (unversioned files you tick are added first, and missing `!` files —
+  deleted outside SVN — are `svn delete`d first, all in one commit);
+- while a commit runs the button shows **Committing…** with a spinner; if it takes a while (a commit hook or
+  approval step holding it), the panel says it is waiting and shows the last line svn or the hook printed.
+  A refused commit shows the hook's message and keeps your message and ticks;
 - **Update**, and per file **Diff** (opens in a terminal), **Add**, **Resolve**, **Revert** (with confirm);
+  for missing files **Mark as deleted** (with confirm) and **Restore** (`svn revert` brings the file back);
 - palette: SVN: Update, SVN: Commit…, SVN: Refresh, SVN: Show log;
 - refreshes on workspace switch, after each action, and when files change (ignores `.svn/`).
 
@@ -82,7 +87,7 @@ Review a branch and merge it into its trunk without typing `svn merge`:
 2. **Merge request…** → pick a branch → **Review** lists the commits trunk does not have yet
    (`svn mergeinfo --show-revs eligible`) and the files they touch. **Open diff** shows trunk → branch in a diff tab.
    If local changes block Accept, the review lists them (status letter + path; unversioned files never block)
-   with **Open diff**, per-file **Revert** and **Revert all** (both confirm first), and **Commit these first**,
+   with **Open diff**, per-file **Revert** (or **Mark as deleted** / **Restore** for missing files) and **Revert all** (both confirm first), and **Commit these first**,
    which ticks them in the normal commit form. The review refreshes after a revert or commit.
 3. **Accept merge** updates the working copy and runs `svn merge ^/branches/... .`. Conflicts land in the
    Conflicted list for **Resolve**.

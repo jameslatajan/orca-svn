@@ -6,13 +6,14 @@ import { dirname, isAbsolute, join, relative, resolve } from 'node:path'
 import type { FileStatus, SvnInfo, SvnFile } from './protocol'
 
 export type RunResult = { stdout: string; stderr: string; code: number }
-export type SvnRunner = (args: string[], cwd: string, timeoutMs: number) => Promise<RunResult>
+/** `onOutput` (optional) receives stdout/stderr text as it arrives, for long commands such as commit. */
+export type SvnRunner = (args: string[], cwd: string, timeoutMs: number, onOutput?: (text: string) => void) => Promise<RunResult>
 
 /** Thrown for every svn failure; `kind` drives the message the panel shows. */
 export class SvnError extends Error {
   constructor(
     message: string,
-    readonly kind: 'missing' | 'not-wc' | 'auth' | 'out-of-date' | 'conflict' | 'timeout' | 'other',
+    readonly kind: 'missing' | 'not-wc' | 'auth' | 'out-of-date' | 'conflict' | 'timeout' | 'hook' | 'other',
     readonly detail = ''
   ) {
     super(message)
@@ -31,9 +32,9 @@ function svnPath(): string {
   return (svnBin = onPath ?? SVN_FALLBACKS.find((p) => existsSync(p)) ?? 'svn')
 }
 
-export const defaultRunner: SvnRunner = (args, cwd, timeoutMs) =>
+export const defaultRunner: SvnRunner = (args, cwd, timeoutMs, onOutput) =>
   new Promise((done, fail) => {
-    execFile(
+    const child = execFile(
       svnPath(),
       args,
       { cwd, timeout: timeoutMs, maxBuffer: 64 * 1024 * 1024, windowsHide: true, encoding: 'utf8' },
@@ -50,6 +51,10 @@ export const defaultRunner: SvnRunner = (args, cwd, timeoutMs) =>
         done({ stdout: String(stdout), stderr: String(stderr), code })
       }
     )
+    if (onOutput) {
+      child.stdout?.on('data', (d) => onOutput(String(d)))
+      child.stderr?.on('data', (d) => onOutput(String(d)))
+    }
   })
 
 /** Returns the subset of `paths` (relative to `cwd`) that git ignores. Empty when git is missing,
@@ -103,6 +108,15 @@ export function mapError(stderr: string): SvnError {
     return new SvnError('SVN needs your login. Run `svn update` once in a terminal and let it save your credentials, then try again.', 'auth', first)
   if (has('E155011', 'E160028', 'E160024', 'E170004', 'out of date', 'out-of-date'))
     return new SvnError('Out of date — run Update first, then commit again.', 'out-of-date', first)
+  if (has('E165001', 'E165000') || /\bhook\b/i.test(stderr)) {
+    // Hook refusals: the hook's own output is the useful part, so show all of it.
+    const text = stderr
+      .split(/\r?\n/)
+      .map((l) => l.replace(/^svn: E\d+: /, '').trim())
+      .filter(Boolean)
+      .join('\n')
+    return new SvnError(text || first, 'hook', first)
+  }
   if (has('E155015', 'remains in conflict', 'E155004'))
     return new SvnError('There are conflicts (or a locked working copy). Resolve them (or run cleanup) first.', 'conflict', first)
   return new SvnError(first.replace(/^svn: /, ''), 'other', first)
@@ -111,8 +125,8 @@ export function mapError(stderr: string): SvnError {
 export const DEFAULT_TIMEOUT_MS = 30_000
 export const LONG_TIMEOUT_MS = 10 * 60_000
 
-export async function svn(run: SvnRunner, args: string[], cwd: string, timeoutMs = DEFAULT_TIMEOUT_MS): Promise<string> {
-  const r = await run(['--non-interactive', ...args], cwd, timeoutMs)
+export async function svn(run: SvnRunner, args: string[], cwd: string, timeoutMs = DEFAULT_TIMEOUT_MS, onOutput?: (text: string) => void): Promise<string> {
+  const r = await run(['--non-interactive', ...args], cwd, timeoutMs, onOutput)
   if (r.code !== 0) throw mapError(r.stderr || r.stdout)
   return r.stdout
 }
@@ -256,27 +270,37 @@ export async function revert(run: SvnRunner, cwd: string, files: readonly string
   await svn(run, ['revert', '--', ...safeFiles(cwd, files)], cwd)
 }
 
+/** Schedules missing (`!`) files for deletion; the files stay gone locally. */
+export async function markDeleted(run: SvnRunner, cwd: string, files: readonly string[]): Promise<void> {
+  await svn(run, ['delete', '--keep-local', '--', ...safeFiles(cwd, files)], cwd)
+}
+
 export async function resolveConflict(run: SvnRunner, cwd: string, files: readonly string[]): Promise<void> {
   await svn(run, ['resolve', '--accept', 'working', '--', ...safeFiles(cwd, files)], cwd)
 }
 
-/** Commits exactly `files`; unversioned ones in `toAdd` are added first. Returns the new revision. */
+/** Commits exactly `files`; unversioned ones in `toAdd` are added and missing ones in `toDelete`
+ *  scheduled for deletion first, so all go in one commit. `onOutput` streams what svn (or a hook)
+ *  prints while the commit runs. Returns the new revision. */
 export async function commit(
   run: SvnRunner,
   cwd: string,
   files: readonly string[],
   message: string,
   toAdd: readonly string[] = [],
-  ignored: IgnoreCheck = gitIgnored
+  ignored: IgnoreCheck = gitIgnored,
+  toDelete: readonly string[] = [],
+  onOutput?: (text: string) => void
 ): Promise<number | null> {
   if (!message.trim()) throw new SvnError('Enter a commit message.', 'other')
   const paths = safeFiles(cwd, files)
   if (toAdd.length) await add(run, cwd, toAdd, ignored)
+  if (toDelete.length) await markDeleted(run, cwd, toDelete)
   const dir = mkdtempSync(join(tmpdir(), 'orca-svn-'))
   const msgFile = join(dir, 'message.txt')
   try {
     writeFileSync(msgFile, message, 'utf8')
-    const out = await svn(run, ['commit', '-F', msgFile, '--encoding', 'utf-8', '--', ...paths], cwd, LONG_TIMEOUT_MS)
+    const out = await svn(run, ['commit', '-F', msgFile, '--encoding', 'utf-8', '--', ...paths], cwd, LONG_TIMEOUT_MS, onOutput)
     return parseRevision(out)
   } finally {
     rmSync(dir, { recursive: true, force: true })

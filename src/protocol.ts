@@ -89,9 +89,11 @@ declare module 'orca' {
     /** SVN state of the focused workspace. */
     'svn.state': { output: SvnState }
     'svn.update': { output: ActionResult }
-    /** Commits exactly `files` (unversioned ones are added first). */
+    /** Commits exactly `files` (unversioned ones are added and missing ones `svn delete`d first, one commit). */
     'svn.commit': { input: { files: string[]; message: string }; output: ActionResult & { revision: number | null } }
     'svn.revert': { input: { files: string[] }; output: ActionResult }
+    /** `svn delete --keep-local` for missing (`!`) files: schedules them for deletion. Restore is `svn.revert`. */
+    'svn.markDeleted': { input: { files: string[] }; output: ActionResult }
     'svn.add': { input: { files: string[] }; output: ActionResult }
     'svn.resolve': { input: { files: string[] }; output: ActionResult }
     /** Opens `svn diff <file>` in an SVN Diff editor tab. */
@@ -129,6 +131,8 @@ declare module 'orca' {
     'svn.changed': SvnState
     /** Asks the panel to focus the commit form (palette "SVN: Commit…"). */
     'svn.showCommit': Record<string, never>
+    /** A running commit is still going after a while: `text` is the latest line svn or a commit hook printed, if any. */
+    'svn.commitProgress': { waiting: boolean; text: string }
     /** Progress of a running `svn.history` load. */
     'svn.historyProgress': { step: string; done: number; total: number }
     /** A partial graph from a running svn.history load, drawn before the final result. */
