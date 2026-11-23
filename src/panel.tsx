@@ -5,6 +5,7 @@ import {
   Box,
   Button,
   Callout,
+  Card,
   Checkbox,
   Collapsible,
   EmptyState,
@@ -24,7 +25,8 @@ import {
   Textarea,
   type PanelContext
 } from 'orca'
-import type { ActionResult, BranchTarget, FileStatus, IgnoreTarget, MergeRequest, SvnFile, SvnState } from './protocol'
+import type { ActionResult, BranchTarget, FileStatus, IgnoreTarget, MergeRequest, SvnFile, SvnState, TaskBranchCreated, TaskBranchInfo } from './protocol'
+import { taskBranchName } from './taskName'
 
 const state = atom<SvnState | null>(null)
 const busy = atom<string | null>(null)
@@ -59,6 +61,18 @@ const confirmBlocker = atom<string | null>(null)
 const confirmDelete = atom<string | null>(null)
 /** Set while a commit has run for a while: the latest line svn or a commit hook printed. */
 const commitWait = atom<{ text: string } | null>(null)
+
+/** New task branch: where branches go (null = form closed), the form, the created branch and its next step. */
+const taskInfo = atom<TaskBranchInfo | null>(null)
+const taskType = atom('feature')
+const taskName = atom('')
+const taskMessage = atom('')
+const taskError = atom<string | null>(null)
+const taskCreated = atom<TaskBranchCreated | null>(null)
+/** Versioned local changes that block "Switch here"; null when none were reported. */
+const taskBlockers = atom<SvnFile[] | null>(null)
+/** Set once "New workspace" started the checkout terminal. */
+const taskCheckout = atom<{ folder: string; command: string } | null>(null)
 
 /** Case-insensitive substring match on the path; empty query matches everything. */
 export function matches(f: SvnFile, q: string): boolean {
@@ -124,6 +138,12 @@ function receive(s: SvnState): void {
   const paths = new Set(s.files.filter(committable).map((f) => f.path))
   const kept = read(checked).filter((p) => paths.has(p))
   if (kept.length !== read(checked).length) set(checked, kept)
+  // Blockers of a task-branch switch follow the working copy (commit/revert clears them).
+  if (read(taskBlockers)) {
+    const left = s.files.filter((f) => f.status !== 'unversioned')
+    set(taskBlockers, left.length ? left : null)
+    if (!left.length) set(taskError, null)
+  }
 }
 
 async function load(): Promise<void> {
@@ -437,6 +457,162 @@ const acceptMerge = () =>
     closeMerge()
   })
 
+// ---------- New task branch ----------
+async function taskStep(label: string, fn: () => Promise<void>): Promise<void> {
+  set(busy, label)
+  set(taskError, null)
+  try {
+    await fn()
+  } catch (err) {
+    set(taskError, err instanceof Error ? err.message : String(err))
+  } finally {
+    set(busy, null)
+  }
+}
+const openTask = () =>
+  taskStep('taskInfo', async () => {
+    set(taskCreated, null)
+    set(taskBlockers, null)
+    set(taskCheckout, null)
+    set(taskInfo, await plugin.request('svn.taskBranchInfo'))
+  })
+const closeTask = () => {
+  set(taskInfo, null)
+  set(taskCreated, null)
+  set(taskBlockers, null)
+  set(taskCheckout, null)
+  set(taskError, null)
+  set(taskName, '')
+  set(taskMessage, '')
+}
+const createTask = () =>
+  taskStep('taskCreate', async () => {
+    const msg = read(taskMessage).trim()
+    const r = await plugin.request('svn.taskBranchCreate', { type: read(taskType), name: read(taskName), ...(msg ? { message: msg } : {}) })
+    set(taskCreated, r)
+    set(notice, { tone: 'success', text: r.message })
+    // The switcher and the merge request list reload and include the new branch.
+    set(branches, null)
+    set(mergeTargets, null)
+  })
+const switchTask = () =>
+  taskStep('taskSwitch', async () => {
+    const c = read(taskCreated)
+    if (!c) return
+    const r = await plugin.request('svn.taskBranchSwitch', { lane: c.lane })
+    if (r.result) {
+      receive(r.result.state)
+      set(notice, { tone: 'success', text: r.result.message })
+      set(branches, null)
+      closeTask()
+      return
+    }
+    set(taskBlockers, r.blockers.length ? r.blockers : null)
+    if (r.block) set(taskError, r.block)
+  })
+const checkoutTask = () =>
+  taskStep('taskCheckout', async () => {
+    const c = read(taskCreated)
+    if (!c) return
+    const r = await plugin.request('svn.taskBranchCheckout', { lane: c.lane })
+    set(taskCheckout, { folder: r.folder, command: r.command })
+  })
+
+/** "One task, one branch": create feature-/fix- branches from trunk, then switch here or check out beside. */
+function TaskBranch() {
+  const b = read(busy)
+  const info = read(taskInfo)
+  const err = read(taskError)
+  const errBox = err ? <Callout tone="danger" title="New task branch"><Text size="sm">{err}</Text></Callout> : null
+  if (!info) {
+    return b === 'taskInfo' ? (
+      <Spinner label="Loading project…" />
+    ) : (
+      <Stack gap="xs" align="stretch">
+        <Button size="sm" variant="outline" icon="add" disabled={!!b} onPress={openTask}>
+          New task branch…
+        </Button>
+        {errBox}
+      </Stack>
+    )
+  }
+  const created = read(taskCreated)
+  if (created) {
+    const blockers = read(taskBlockers)
+    const co = read(taskCheckout)
+    return (
+      <Card title={`Task branch ${created.name}`} description={created.path}>
+        <Stack gap="xs" align="stretch">
+          <Text size="xs" muted>Work on it here or in a separate checkout:</Text>
+          <Grid columns={2} gap="xs">
+            <Button size="sm" variant="solid" tone="accent" icon="branch" disabled={!!b || !!blockers?.length} onPress={switchTask}>
+              {b === 'taskSwitch' ? 'Switching…' : 'Switch here'}
+            </Button>
+            <Button size="sm" variant="outline" icon="open-external" disabled={!!b || !!co} onPress={checkoutTask}>
+              {b === 'taskCheckout' ? 'Starting…' : 'New workspace'}
+            </Button>
+          </Grid>
+          {errBox}
+          {blockers?.length ? <MergeBlockers files={blockers} /> : null}
+          {co ? (
+            <Callout tone="neutral" title="Checking out in a terminal">
+              <Stack gap="xs">
+                <Text size="xs">{created.workspaceNote}</Text>
+                <Input label="Checkout command (select to copy)" value={co.command} />
+                <Text size="xs" muted>{`Folder: ${co.folder}`}</Text>
+              </Stack>
+            </Callout>
+          ) : (
+            <Text size="xs" muted>{`Or run: ${created.checkout.command}`}</Text>
+          )}
+          <Button size="sm" variant="ghost" onPress={closeTask}>
+            Done
+          </Button>
+        </Stack>
+      </Card>
+    )
+  }
+  const n = taskBranchName(read(taskType), read(taskName))
+  const typed = read(taskName).trim() !== ''
+  return (
+    <Card title="New task branch" description={`From ${info.trunk} HEAD`}>
+      <Stack gap="xs" align="stretch">
+        <Select
+          label="Task type"
+          value={read(taskType)}
+          disabled={!!b}
+          options={[
+            { value: 'feature', label: 'Feature' },
+            { value: 'fix', label: 'Fix' }
+          ]}
+          onChange={(v) => set(taskType, v)}
+        />
+        <Input
+          label="Short name"
+          placeholder="e.g. kiosk printer"
+          maxLength={80}
+          value={read(taskName)}
+          invalid={typed && 'error' in n}
+          disabled={!!b}
+          onChange={(v) => set(taskName, v)}
+          onSubmit={() => void ('name' in n && createTask())}
+        />
+        <Textarea label="Commit message (optional)" placeholder="Commit message for the copy (optional)" rows={2} value={read(taskMessage)} disabled={!!b} onChange={(v) => set(taskMessage, v)} />
+        <Text size="xs" muted>{'name' in n ? `${info.base}/${n.name}` : typed ? n.error : `${info.base}/${read(taskType)}-…`}</Text>
+        {errBox}
+        <Grid columns={2} gap="xs">
+          <Button size="sm" variant="solid" tone="accent" icon="add" disabled={!!b || 'error' in n} onPress={createTask}>
+            {b === 'taskCreate' ? 'Creating…' : 'Create'}
+          </Button>
+          <Button size="sm" variant="outline" disabled={!!b} onPress={closeTask}>
+            Cancel
+          </Button>
+        </Grid>
+      </Stack>
+    </Card>
+  )
+}
+
 /** Re-reviews an open merge request that local changes blocked, so Accept unlocks once they are gone. */
 async function refreshBlocked(): Promise<void> {
   if (read(mergeReview)?.blockers?.length) await reviewMerge()
@@ -453,7 +629,7 @@ function commitBlockers(files: SvnFile[]): void {
   const skipped = files.length - ok.length
   set(notice, {
     tone: 'success',
-    text: `Write a message and press Commit below; the merge request refreshes after.${skipped ? ` Resolve or revert ${skipped} conflicted file${skipped === 1 ? '' : 's'} first.` : ''}`
+    text: `Write a message and press Commit below; the blocking list refreshes after.${skipped ? ` Resolve or revert ${skipped} conflicted file${skipped === 1 ? '' : 's'} first.` : ''}`
   })
 }
 
@@ -827,6 +1003,7 @@ export default function Panel() {
     <Stack gap="sm">
       <Header s={s} />
       <Branches />
+      {s.where?.project ? <TaskBranch /> : null}
       <MergeRequests />
       <Separator />
       {s.behind ? (
@@ -856,6 +1033,7 @@ export default function Panel() {
 export function setup(ctx: PanelContext): void {
   ctx.subscriptions.push(plugin.on('svn.changed', (payload) => receive(payload)))
   ctx.subscriptions.push(plugin.on('svn.commitProgress', (p) => { if (read(busy) === 'commit' && p.waiting) set(commitWait, { text: p.text }) }))
+  ctx.subscriptions.push(plugin.on('svn.showTaskBranch', () => void (read(taskInfo) ? undefined : openTask())))
   ctx.subscriptions.push(plugin.on('svn.showCommit', () => set(notice, { tone: 'success', text: 'Write a message, tick files, then press Commit.' })))
   void load()
 }

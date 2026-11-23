@@ -7,6 +7,11 @@ import { loadHistory, parseLayout, loadMore, type GraphInput, type LaneUrls } fr
 import { watchFolder, type FolderWatch } from './watch'
 import * as project from './project'
 import * as merge from './merge'
+import { taskBranchName } from './taskName'
+
+/** Why "Open in a new workspace" stops at a checkout: the host API cannot add a folder workspace. */
+export const WORKSPACE_NOTE =
+  "Orca's plugin API can only create Git worktree workspaces (workspace.create), not open a new folder, so the plugin checks the branch out for you; then add that folder to Orca as a project to work on it in its own workspace."
 
 /** Injection points and timings; tests change them. */
 export const options: { runner: svn.SvnRunner; watchDelayMs: number; statusTimeoutMs: number; commitWaitMs: number } = {
@@ -411,6 +416,74 @@ export default function activate(orca: OrcaWorkerApi): void {
     })
   })
 
+  // ---------- Task branches ----------
+  /** This working copy's project scope and where its task branches go ("^/…" paths without "^"). */
+  const taskScope = async (path: string) => {
+    const info = await svn.info(options.runner, path)
+    const root = rootOf(info)
+    const config = await configOf(path)
+    const scope = await project.projectScope(options.runner, path, root, info.relativeUrl, config)
+    if (!scope || (scope.loc.line !== 'trunk' && scope.loc.line !== 'branch'))
+      throw invalid('New task branch needs a project working copy: ^/trunk/<project> or one of its branches.')
+    return { root, scope, base: config.branchesPath ?? project.branchesBase(scope.loc) }
+  }
+  orca.panels.handle('svn.taskBranchInfo', async () => {
+    const ws = await local()
+    return svnInvalid(async () => {
+      const t = await taskScope(ws.path)
+      return { project: t.scope.loc.project, base: `^${t.base}`, trunk: `^${t.scope.trunkPath}` }
+    })
+  })
+  orca.panels.handle('svn.taskBranchCreate', async ({ type, name, message }) => {
+    const n = taskBranchName(type, typeof name === 'string' ? name : '')
+    if ('error' in n) throw invalid(n.error)
+    const ws = await local()
+    return svnInvalid(async () => {
+      const t = await taskScope(ws.path)
+      if (t.scope.branches.some((b) => b.name === n.name)) throw invalid(`Branch ${n.name} already exists in ^${t.base}.`)
+      const msg = message?.trim() || `Create ${type} branch ${n.name} for ${t.scope.loc.project} from ^${t.scope.trunkPath}`
+      const r = await project.createBranch(options.runner, ws.path, t.root, t.scope, n.name, msg, t.base)
+      forgetHeads()
+      await listBranches(ws.path)
+      const lane = `b:${n.name}`
+      const url = branchUrls.get(lane) ?? t.root.replace(/\/+$/, '') + r.path
+      branchUrls.set(lane, url)
+      const folder = project.checkoutFolder(ws.path, n.name)
+      return {
+        message: `Created ^${r.path}${r.revision != null ? ` at r${r.revision}` : ''} from ^${t.scope.trunkPath}.`,
+        name: n.name,
+        path: `^${r.path}`,
+        lane,
+        revision: r.revision,
+        checkout: { folder, command: project.checkoutCommand(url, folder) },
+        workspaceNote: WORKSPACE_NOTE
+      }
+    })
+  })
+  orca.panels.handle('svn.taskBranchSwitch', async ({ lane }) => {
+    const pre = await local()
+    if (typeof lane !== 'string' || !lane.startsWith('b:')) throw invalid('Pick a task branch.')
+    if (!branchUrls.has(lane)) await svnInvalid(() => listBranches(pre.path))
+    const url = laneUrl(lane)
+    const blockers = project.switchBlockers(await svnInvalid(() => svn.status(options.runner, pre.path, options.statusTimeoutMs)))
+    if (blockers.length)
+      return { blockers, block: `Commit or revert local changes first (${blockers.length} changed). Unversioned files stay and do not block.` }
+    const check = await svnInvalid(() => guardSwitch(pre.path, url))
+    if (check.block) return { blockers: [], block: check.block }
+    const r = await act((ws) => svn.switchTo(options.runner, ws.path, url), (rev) => `Switched to ${lane.slice(2)}${rev != null ? ` at r${rev}` : ''}.`)
+    return { blockers: [], result: { message: r.message, state: r.state } }
+  })
+  orca.panels.handle('svn.taskBranchCheckout', async ({ lane }) => {
+    const ws = await local()
+    if (typeof lane !== 'string' || !lane.startsWith('b:')) throw invalid('Pick a task branch.')
+    if (!branchUrls.has(lane)) await svnInvalid(() => listBranches(ws.path))
+    const url = laneUrl(lane)
+    const folder = await svnInvalid(async () => project.checkoutFolder(ws.path, lane.slice(2)))
+    const command = project.checkoutCommand(url, folder)
+    const { terminalId } = await orca.host.call('terminal.create', { workspaceId: ws.workspaceId, title: `svn checkout ${lane.slice(2)}`, command })
+    return { terminalId, folder, command }
+  })
+
   orca.panels.handle('svn.branches', async () => {
     const ws = await local()
     return svnInvalid(() => listBranches(ws.path))
@@ -539,6 +612,10 @@ export default function activate(orca: OrcaWorkerApi): void {
   orca.commands.register('svn.commit', async () => {
     orca.panels.post('svn.showCommit', {})
     return notify('Tick files and write a message in the SVN panel, then press Commit.')
+  })
+  orca.commands.register('svn.newTaskBranch', async () => {
+    orca.panels.post('svn.showTaskBranch', {})
+    return notify('Pick feature or fix and a short name in the SVN panel, then press Create.')
   })
   orca.commands.register('svn.refresh', async () => {
     await refresh()

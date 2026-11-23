@@ -3,7 +3,7 @@
 // tests; the async helpers do the svn calls.
 import { existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
-import { join } from 'node:path'
+import { basename, dirname, join } from 'node:path'
 import * as svn from './svn'
 import type { SvnFile } from './protocol'
 
@@ -244,8 +244,17 @@ export function newBranchPath(loc: { prefix: string; project: string }, name: st
 }
 
 /** `svn copy --parents ^/trunk/<project> ^/branches/<project>/<name>`; returns the new revision. */
-export async function createBranch(run: svn.SvnRunner, cwd: string, rootUrl: string, scope: Scope, name: string, message?: string): Promise<{ path: string; revision: number | null }> {
-  const path = newBranchPath(scope.loc, name)
+export async function createBranch(
+  run: svn.SvnRunner,
+  cwd: string,
+  rootUrl: string,
+  scope: Scope,
+  name: string,
+  message?: string,
+  /** Folder for the branch instead of /branches/<project> (the `branchesPath` setting). */
+  base?: string
+): Promise<{ path: string; revision: number | null }> {
+  const path = base ? `${base.replace(/\/+$/, '')}/${checkBranchName(name)}` : newBranchPath(scope.loc, name)
   if (scope.branches.some((b) => b.path === path)) throw new svn.SvnError(`Branch ${path} already exists.`, 'other')
   const urlOf = (p: string) => rootUrl.replace(/\/+$/, '') + p
   const dir = mkdtempSync(join(tmpdir(), 'orca-svn-'))
@@ -257,4 +266,32 @@ export async function createBranch(run: svn.SvnRunner, cwd: string, rootUrl: str
   } finally {
     rmSync(dir, { recursive: true, force: true })
   }
+}
+
+// ---------- Task branches ----------
+
+/** Repository folder that holds this project's branches, e.g. "/branches/clinicsys". */
+export function branchesBase(loc: { prefix: string; project: string }): string {
+  return `${loc.prefix}/branches/${loc.project}`
+}
+
+/** Versioned local changes that keep a task-branch switch from running (unversioned files do not count). */
+export function switchBlockers(files: readonly SvnFile[]): SvnFile[] {
+  return files.filter((f) => f.status !== 'unversioned')
+}
+
+/**
+ * A free folder next to the working copy for a checkout of `branch`: "<parent>/<wc folder>-<branch>",
+ * then "-2", "-3"… when taken.
+ */
+export function checkoutFolder(wcPath: string, branch: string, exists: (p: string) => boolean = existsSync): string {
+  const base = join(dirname(wcPath), `${basename(wcPath.replace(/[\/]+$/, ''))}-${branch}`)
+  if (!exists(base)) return base
+  for (let i = 2; i < 100; i++) if (!exists(`${base}-${i}`)) return `${base}-${i}`
+  throw new svn.SvnError(`No free folder next to ${wcPath} for ${branch}.`, 'other')
+}
+
+/** The `svn checkout` line a person can paste into any shell (both arguments double-quoted). */
+export function checkoutCommand(url: string, folder: string): string {
+  return `svn checkout "${url}" "${folder}"`
 }

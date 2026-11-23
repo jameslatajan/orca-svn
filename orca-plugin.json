@@ -62,6 +62,7 @@
     "commands": [
       { "id": "svn.update", "title": "SVN: Update", "when": "workspace" },
       { "id": "svn.commit", "title": "SVN: Commit…", "when": "workspace" },
+      { "id": "svn.newTaskBranch", "title": "SVN: New task branch…", "when": "workspace" },
       { "id": "svn.refresh", "title": "SVN: Refresh", "when": "workspace" },
       { "id": "svn.log", "title": "SVN: Show log", "when": "workspace" }
     ],
